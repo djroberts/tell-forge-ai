@@ -60,11 +60,17 @@ object ToolRegistry {
                 "dedicated tool fits (e.g. git status, npm --version).\n" +
                 (if (planMode) "Foretell mode: only read-only commands are allowed (ls, cat, find, " +
                     "git status/log/diff, node --version, ...). " else "") +
+                "MUTATIONS ARE ALLOWED in Forge mode when the user asks for them: " +
+                "git add/commit/push, npm install, gradle build, git config and similar " +
+                "state-changing commands run fine as single commands. " +
                 "NEVER use pipes (|), redirects (>), command substitution (\$(...), backticks) or " +
                 "compound commands (;, &&, ||) — these are always refused even for read-only " +
                 "commands. Run a single simple command instead; if you need grep-like output " +
                 "filtering, use search_files or read_file rather than 'grep ... | head'.\n" +
-                "Destructive or mutating commands are forbidden.",
+                "Do NOT claim a mutation is impossible without first TRYING it: if the user " +
+                "is confident a command should work, run it once and report the real error " +
+                "instead of asserting tool restrictions from memory.\n" +
+                "Destructive commands (rm, sudo, force-push) still need explicit user request.",
             jsonObjectProps("command" to "The shell command to execute. Single command only — no pipes, redirects, or command chaining."),
             required = listOf("command"),
         ),

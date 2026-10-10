@@ -54,6 +54,8 @@ object Prompts {
         |- run_command is a last resort for things no dedicated tool does (git, npm, etc.).
         |  It must be a SINGLE simple command: pipes (|), redirects (>), command
         |  substitution ($(...)) and chaining (;, &&) are always refused and will error.
+        |  Mutations (git add/commit/push, npm install, gradle build) ARE allowed in Forge
+        |  mode when the user asks for them — run them, do not claim they are blocked.
         |  If a command is blocked, do NOT retry variations — switch to a dedicated tool.
         |- Treat "command not found" (exit 127) as UNPROVEN, never as a conclusion:
         |  the tool's shell runs with a restricted PATH (no Homebrew, no version
