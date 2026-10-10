@@ -87,8 +87,11 @@ jobs:
 
           # ---- inspect the commit bodies for the ring of power ------------
           # Patch wins over nothing, minor over patch, major over all.
+          # Scoped types ("feat(ui): ...") are normalized to bare types first,
+          # and a scope with a bang ("fix(ci)!:") still counts as breaking.
           BUMP="none"
           while IFS= read -r line; do
+            line="$(printf '%s' "$line" | sed -E 's/^(feat|fix|refactor|perf|chore|docs|test|build|ci)\([^)]*\)(!?):/\1\2:/')"
             case "$line" in
               # BREAKING CHANGE: footer in the body, or major scopes
               BREAKING\ CHANGE:*|feat!:*|fix!:*|refactor!:*|perf!:*|chore!:*)
@@ -142,6 +145,55 @@ jobs:
           echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
           echo "bump=$BUMP"              >> "$GITHUB_OUTPUT"
           echo "release=true"            >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # Cut the changelog: turn the curated [Unreleased] section into a
+      # dated [X.Y.Z] section, commit it, and push — so the tag below
+      # points at a commit that contains its own changelog.
+      # ------------------------------------------------------------------
+      - name: Cut the changelog
+        if: steps.version.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DATE="$(date +%Y-%m-%d)"
+
+          python3 - "$VERSION" "$DATE" <<'EOF'
+          import sys, re, pathlib
+
+          ver, date = sys.argv[1], sys.argv[2]
+          p = pathlib.Path("CHANGELOG.md")
+          text = p.read_text() if p.exists() else "# Changelog\n\n## [Unreleased]\n"
+
+          m = re.search(r"## \[Unreleased\]\n(.*?)(?=\n## \[|\Z)", text, re.S)
+          body = m.group(1).strip() if (m and m.group(1).strip()) else "- See commit history."
+
+          # Drop the Unreleased section and insert the new version section
+          # in its place (above any previously released sections).
+          text = re.sub(r"## \[Unreleased\]\n.*?(?=\n## \[|\Z)", "", text, flags=re.S)
+          section = f"## [{ver}] - {date}\n{body}\n"
+          anchor = text.find("## [")
+          if anchor == -1:
+              text = text.rstrip() + "\n\n" + section
+          else:
+              text = text[:anchor] + section + "\n" + text[anchor:]
+          p.write_text(text.lstrip())
+          EOF
+
+          # Stash the release notes for the GitHub Release body.
+          mkdir -p build
+          sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md | sed '$d' > build/release_body.md
+          [ -s build/release_body.md ] || echo "Release v$VERSION" > build/release_body.md
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore(release): v$VERSION [skip ci]"
+          NEW_SHA="$(git rev-parse HEAD)"
+          git push
+          echo "sha=$NEW_SHA" >> "$GITHUB_OUTPUT"
+        id: changelog
 
       # ------------------------------------------------------------------
       # Nothing worth releasing — go quietly into the West.
@@ -206,11 +258,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ steps.changelog.outputs.sha }}
           name: TellForgeAI v${{ steps.version.outputs.version }}
-          body: |
-            Automated release ${{ steps.version.outputs.version }} (${{ steps.version.outputs.bump }} bump).
-
-            Built from commit ${{ github.sha }}.
+          body_path: build/release_body.md
+          append_body: true
           generate_release_notes: true
           files: build/distributions/*.zip
           fail_on_unmatched_files: true

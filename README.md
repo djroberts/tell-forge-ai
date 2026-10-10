@@ -53,6 +53,14 @@ The workflow builds the plugin, tags the commit (`vX.Y.Z`) and attaches the zip
 to a GitHub Release with auto-generated notes. The version lives in the tag —
 no version file to maintain.
 
+## Changelog
+
+Release notes live in [CHANGELOG.md](CHANGELOG.md). During development, changes
+accumulate under `## [Unreleased]` — every `feat:`/`fix:` commit updates it
+(see `AGENTS.md` for the exact rules). When the release workflow cuts a
+version, it converts `Unreleased` into a dated `## [X.Y.Z]` section, commits
+that, and uses it as the GitHub Release notes.
+
 ## Roadmap (full agentic core, next phase)
 
 - Tool-use loop: read/search/edit files with diff-based approve/reject.

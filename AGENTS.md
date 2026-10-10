@@ -19,6 +19,39 @@ Use a scope when it helps identify the affected area (for example, `tools`, `set
 
 The release workflow parses Conventional Commit subjects: `fix` triggers a patch release, `feat` a minor release, and `!` or a `BREAKING CHANGE:` footer a major release. Use `feat` or `fix` only when that release impact is intended; docs, tests, refactors, and chores do not trigger a release on their own.
 
+## Changelog
+
+`CHANGELOG.md` (Keep a Changelog format) is the single source of truth for
+release notes. The release workflow turns the `## [Unreleased]` section into
+a dated `## [X.Y.Z]` section and uses it as the GitHub Release body — it is
+never edited by the workflow beyond that cut.
+
+When creating a commit that includes user-facing changes (any `feat:` or
+`fix:`), update the `## [Unreleased]` section in the **same commit**:
+
+- Add one bullet under the matching subsection: `### Added`, `### Changed`,
+  `### Fixed`, or `### Removed` (create the subsection if it does not exist).
+- Write bullets from the user's perspective: imperative, concise, one change
+  per bullet. Mention the affected area (tool window, providers, tools, …).
+  Commit hashes and type prefixes like `feat(ui):` are optional in
+  parentheses, never in the bullet text itself.
+- Never modify already-released sections, and never add an `## [X.Y.Z]`
+  section yourself — the release workflow does that.
+- `docs:`, `test:`, `refactor:`, and `chore:` commits do not need changelog
+  entries (unless they change user-visible behavior or the build artifacts).
+
+Example:
+
+```markdown
+## [Unreleased]
+
+### Added
+- Per-profile Foretell model selection (providers)
+
+### Fixed
+- Chat panel no longer loses scroll position on streaming updates (ui)
+```
+
 ## Project context and conventions
 
 - TellForgeAI is a Kotlin/JVM IntelliJ Platform plugin targeting WebStorm 2025.1 / platform build 251+, built with Gradle and JDK 21. Keep changes compatible with the IntelliJ Platform APIs and existing Kotlin style; avoid adding dependencies unless they are needed.
