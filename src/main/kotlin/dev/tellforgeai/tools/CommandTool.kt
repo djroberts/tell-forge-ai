@@ -23,6 +23,8 @@ object CommandTool {
     private val READ_ONLY_PREFIXES_UNIX = listOf(
         "ls", "cat", "head", "tail", "find", "grep", "rg", "pwd", "wc", "file",
         "git status", "git log", "git diff", "git show", "git branch", "git remote",
+        "git blame", "git stash list", "git tag", "git describe", "git rev-parse",
+        "git ls-files", "git ls-remote", "git config --get", "git config --list",
         "node ", "node --", "npm ", "npx ", "yarn ", "pnpm ", "php ", "composer ",
         "which", "echo", "du ", "df ", "whoami", "tree",
     )
@@ -30,7 +32,10 @@ object CommandTool {
     private val READ_ONLY_PREFIXES_WINDOWS = listOf(
         "dir", "type", "more", "where", "findstr", "systeminfo", "ver", "tasklist",
         "ipconfig", "netstat -an", "git status", "git log", "git diff", "git show",
-        "git branch", "git remote", "node ", "node --", "npm ", "npx ", "yarn ",
+        "git branch", "git remote", "git blame", "git stash list", "git tag",
+        "git describe", "git rev-parse", "git ls-files", "git ls-remote",
+        "git config --get", "git config --list",
+        "node ", "node --", "npm ", "npx ", "yarn ",
         "pnpm ", "php ", "composer ", "echo", "tree",
     )
     private val READ_ONLY_PREFIXES: List<String>
