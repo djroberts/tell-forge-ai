@@ -58,3 +58,7 @@ no version file to maintain.
 - Tool-use loop: read/search/edit files with diff-based approve/reject.
 - Terminal command execution with approval (Forge mode).
 - Checkpoints, workspace context, MCP support.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
