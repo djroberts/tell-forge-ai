@@ -126,7 +126,7 @@ class TellForgeAIConfigurable : Configurable {
         val profile = list.selectedValue ?: return
         fetchModelsButton.isEnabled = false
         fetchModelsButton.text = "Fetching\u2026"
-        testClient.fetchModels(profile) { ids ->
+        testClient.fetchModelsWithApiKey(profile, profile.apiKey) { ids ->
             javax.swing.SwingUtilities.invokeLater {
                 fetchModelsButton.isEnabled = true
                 fetchModelsButton.text = "\u21c5 Fetch"
@@ -269,7 +269,9 @@ class TellForgeAIConfigurable : Configurable {
         nameField.text = p.name
         protocolCombo.selectedItem = p.apiProtocol.displayName
         urlField.text = p.baseUrl
-        keyField.text = ApiKeyStore.get(p.id).orEmpty()
+        // listModel is the source of truth for this settings session, including
+        // an intentionally-cleared or newly-entered key that has not been applied.
+        keyField.text = p.apiKey
         modelField.text = p.model
         planModelField.text = p.planModel.orEmpty()
         reasoningEffortField.text = p.reasoningEffort.orEmpty()
@@ -315,11 +317,11 @@ class TellForgeAIConfigurable : Configurable {
         val profile = list.selectedValue ?: return
         testButton.isEnabled = false
         testButton.text = "Testing…"
-        testClient.testConnection(profile) { result ->
+        testClient.testConnectionWithApiKey(profile, profile.apiKey) { result ->
             // Try to auto-detect the context window from /models regardless of
             // the connection result; prefill the field when a value is found and
             // the user hasn't entered a specific one (blank or the 128k default).
-            testClient.fetchContextWindow(profile) { detected ->
+            testClient.fetchContextWindowWithApiKey(profile, apiKey = profile.apiKey) { detected ->
                 javax.swing.SwingUtilities.invokeLater {
                     testButton.isEnabled = true
                     testButton.text = "Test connection"
@@ -439,8 +441,8 @@ class TellForgeAIConfigurable : Configurable {
             ApiKeyStore.set(it.id, it.apiKey)
             settings.upsert(it.copy(apiKey = ""))
         }
-        // Keep in-memory list copies free of the secret too.
-        for (i in 0 until listModel.size) listModel[i] = listModel[i].copy(apiKey = "")
+        // Keep the key in the settings-session model so switching profiles after
+        // Apply still displays it; it is only persisted to PasswordSafe, never XML.
         modified = false
     }
 

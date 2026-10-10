@@ -9,6 +9,7 @@ The `## [0.3.0] - 2026-10-10
 - Rebranded the plugin as TellForgeAI (`feat`)
 
 ### Fixed
+- Keep unsaved provider keys visible when switching profiles and use them for connection tests, model fetches, and context detection (`fix(settings)`)
 - Corrected command output parsing in CommandTool (`fix(tools)`)
 - Clarified that mutations work in Forge mode via run_command (`fix(tools)`)
 - Fixed the semver bump loop that aborted under `set -e` in CI (`fix(ci)`)

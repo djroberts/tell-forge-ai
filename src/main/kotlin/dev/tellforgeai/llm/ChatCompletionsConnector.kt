@@ -101,11 +101,17 @@ class ChatCompletionsConnector : LlmConnector {
         }
 
         /** Shared simple GET request against `{baseUrl}{path}` with Bearer auth. */
-        internal fun modelsRequest(profile: ProviderProfile, protocol: ApiProtocol): Request =
-            Request.Builder()
+        internal fun modelsRequest(
+            profile: ProviderProfile,
+            protocol: ApiProtocol,
+            apiKey: String? = null,
+        ): Request {
+            val key = apiKey ?: ApiKeyStore.get(profile.id).orEmpty()
+            val builder = Request.Builder()
                 .url(profile.trimmedBaseUrl() + protocol.modelsPath)
-                .header("Authorization", "Bearer ${ApiKeyStore.get(profile.id).orEmpty()}")
-                .build()
+            if (key.isNotBlank()) builder.header("Authorization", "Bearer $key")
+            return builder.build()
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

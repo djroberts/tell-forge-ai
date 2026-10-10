@@ -87,12 +87,21 @@ class LlmClient {
      * backends.
      */
     fun fetchContextWindow(profile: ProviderProfile, onResult: (Int?) -> Unit) {
-        fetchContextWindow(profile, profile.model, onResult)
+        fetchContextWindowWithApiKey(profile, profile.model, null, onResult)
     }
 
     /** As above, for a specific model (e.g. the plan-mode model), not the profile default. */
     fun fetchContextWindow(profile: ProviderProfile, model: String, onResult: (Int?) -> Unit) {
-        fetchModelsRaw(profile) { body ->
+        fetchContextWindowWithApiKey(profile, model, null, onResult)
+    }
+
+    fun fetchContextWindowWithApiKey(
+        profile: ProviderProfile,
+        model: String = profile.model,
+        apiKey: String?,
+        onResult: (Int?) -> Unit,
+    ) {
+        fetchModelsRaw(profile, apiKey) { body ->
             onResult(body?.let { ContextLimitParser.fromModelsJson(it, model) })
         }
     }
@@ -102,7 +111,15 @@ class LlmClient {
      * Invokes [onResult] on a background thread.
      */
     fun testConnection(profile: ProviderProfile, onResult: (String) -> Unit) {
-        fetchModelsRaw(profile) { body ->
+        testConnectionWithApiKey(profile, null, onResult)
+    }
+
+    fun testConnectionWithApiKey(
+        profile: ProviderProfile,
+        apiKey: String?,
+        onResult: (String) -> Unit,
+    ) {
+        fetchModelsRaw(profile, apiKey) { body ->
             onResult(body?.let { "Connection OK" }
                 ?: "Failed: endpoint unreachable or returned an error")
         }
@@ -114,15 +131,23 @@ class LlmClient {
      * the settings dropdown stays responsive.
      */
     fun fetchModels(profile: ProviderProfile, onResult: (List<String>) -> Unit) {
-        fetchModelsRaw(profile) { body ->
+        fetchModelsWithApiKey(profile, null, onResult)
+    }
+
+    fun fetchModelsWithApiKey(
+        profile: ProviderProfile,
+        apiKey: String?,
+        onResult: (List<String>) -> Unit,
+    ) {
+        fetchModelsRaw(profile, apiKey) { body ->
             val ids = body?.let { parseModelIds(it) }.orEmpty()
             onResult(ids.take(200))
         }
     }
 
     /** Issues the GET and hands the raw (nullable) body to [onBody]. */
-    private fun fetchModelsRaw(profile: ProviderProfile, onBody: (String?) -> Unit) {
-        val request = ChatCompletionsConnector.modelsRequest(profile, profile.apiProtocol.connector)
+    private fun fetchModelsRaw(profile: ProviderProfile, apiKey: String? = null, onBody: (String?) -> Unit) {
+        val request = ChatCompletionsConnector.modelsRequest(profile, profile.apiProtocol.connector, apiKey)
         Shared.http.newCall(request).enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                     onBody(null)
