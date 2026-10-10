@@ -48,6 +48,7 @@ import java.util.Base64
 import javax.imageio.ImageIO
 import javax.swing.*
 import javax.swing.event.HyperlinkEvent
+import javax.swing.event.HyperlinkListener
 import javax.swing.text.DefaultEditorKit
 import javax.swing.text.DefaultCaret
 import javax.swing.text.Element
@@ -58,6 +59,8 @@ import javax.swing.text.html.HTMLEditorKit
 import javax.swing.KeyStroke
 import java.awt.event.KeyEvent
 import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.StringSelection
+import java.awt.Toolkit
 import java.security.MessageDigest
 import java.awt.datatransfer.Transferable
 
@@ -339,11 +342,25 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         val tailKit = HTMLEditorKit().apply { styleSheet = css }
         tailPane.editorKit = tailKit
         (tailPane.caret as? DefaultCaret)?.updatePolicy = DefaultCaret.NEVER_UPDATE
+        // "⧉ copy" links embedded in code/output blocks (see copyLinkHtml) go to
+        // the system clipboard on click. Only ACTIVATED events fire that way —
+        // drag-selection in the pane is unaffected.
+        val copyLinkHandler = HyperlinkListener { e ->
+            if (e.eventType != HyperlinkEvent.EventType.ACTIVATED) return@HyperlinkListener
+            val href = e.url?.toString() ?: e.description ?: return@HyperlinkListener
+            CopyLink.textFromHref(href)?.let { text ->
+                Toolkit.getDefaultToolkit().systemClipboard
+                    .setContents(StringSelection(text), null)
+            }
+        }
+        transcriptPane.addHyperlinkListener(copyLinkHandler)
+        tailPane.addHyperlinkListener(copyLinkHandler)
         val dark = UIUtil.isUnderDarcula()
         userBubbleBg = if (dark) Color(0x2B4A66) else Color(0xE1ECFA)
         assistantBubbleBg = if (dark) Color(0x3C3F41) else Color(0xF4F4F4)
         css.addRule("body { font-family: ${UIUtil.getLabelFont().fontName}; font-size: ${UIUtil.getLabelFont().size}pt; margin: 12px; }")
         css.addRule("pre { background: ${hex(if (dark) Color(0x2B2B2B) else Color(0xEEEEEE))}; padding: 8px; }")
+        css.addRule("a { color: ${hex(if (dark) Color(0x6E8FB8) else Color(0x6E8FB8))}; }")
         css.addRule(".who { font-weight: bold; margin-bottom: 3px; }")
         css.addRule(".mode { color: #888; font-size: 0.85em; }")
         css.addRule("hr { border: 0; height: 1px; background: ${hex(if (dark) Color(0x4E5254) else Color(0xE0E0E0))}; }")
@@ -1220,8 +1237,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             "edit_file" -> summaryLine("✏️", path, "edited in editor (undoable)")
             else -> {
                 // run_command etc.: keep the output visible, capped.
-                val body = if (result.length > 2000) esc(result.take(2000)) + "\n... (truncated)" else esc(result)
-                "<pre style='margin:4px 0;white-space:pre-wrap'>$body</pre>"
+                val shown = if (result.length > 2000) result.take(2000) + "\n... (truncated)" else result
+                // Copy affordance sits at the block's top-right; payload is the
+                // text as shown (including any "... (truncated)" suffix).
+                CopyLink.html(shown) +
+                    "<pre style='margin:4px 0;white-space:pre-wrap'>${esc(shown)}</pre>"
             }
         }
         finishedBlocks.add(toolBubble(
@@ -1945,13 +1965,24 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun markdownToHtml(md: String): String {
         val sb = StringBuilder()
         var inCode = false
+        val codeLines = mutableListOf<String>()
         for (line in md.split("\n")) {
             when {
                 line.trimStart().startsWith("```") -> {
-                    if (inCode) sb.append("</pre>") else sb.append("<pre>")
+                    if (inCode) {
+                        // Copy affordance goes INSIDE the <pre> so it sits at the
+                        // block's top-right corner.
+                        val code = codeLines.joinToString("\n")
+                        if (code.isNotBlank()) sb.append(CopyLink.html(code))
+                        sb.append("</pre>")
+                        codeLines.clear()
+                    } else sb.append("<pre>")
                     inCode = !inCode
                 }
-                inCode -> sb.append(esc(line)).append('\n')
+                inCode -> {
+                    codeLines.add(line)
+                    sb.append(esc(line)).append('\n')
+                }
                 else -> {
                     var l = esc(line)
                     l = l.replace(Regex("`([^`]+)`")) { m -> "<code>${m.groupValues[1]}</code>" }
@@ -1960,7 +1991,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 }
             }
         }
-        if (inCode) sb.append("</pre>")
+        if (inCode) {
+            val code = codeLines.joinToString("\n")
+            if (code.isNotBlank()) sb.append(CopyLink.html(code))
+            sb.append("</pre>")
+        }
         return sb.toString()
     }
 
