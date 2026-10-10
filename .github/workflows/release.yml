@@ -94,11 +94,13 @@ jobs:
               BREAKING\ CHANGE:*|feat!:*|fix!:*|refactor!:*|perf!:*|chore!:*)
                 BUMP="major" ;;
               feat:*)
-                [ "$BUMP" = "patch" ] || [ "$BUMP" = "none" ] && BUMP="minor"
-                true ;;
+                if [ "$BUMP" = "patch" ] || [ "$BUMP" = "none" ]; then
+                  BUMP="minor"
+                fi ;;
               fix:*)
-                [ "$BUMP" = "none" ] && BUMP="patch"
-                true ;;
+                if [ "$BUMP" = "none" ]; then
+                  BUMP="patch"
+                fi ;;
             esac
             [ "$BUMP" = "major" ] && break
           done <<< "$COMMITS"
