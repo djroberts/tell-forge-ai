@@ -1,0 +1,118 @@
+package dev.tellforgeai.settings
+
+import com.intellij.openapi.components.PersistentStateComponent
+import com.intellij.openapi.components.State
+import com.intellij.openapi.components.Storage
+import com.intellij.openapi.application.ApplicationManager
+import dev.tellforgeai.model.ProviderProfile
+
+class ModelInfoCacheEntry {
+    var key: String = ""
+    var contextWindow: Int = 0
+    var inputPricePerMillion: Double? = null
+    var cachedInputPricePerMillion: Double? = null
+    var outputPricePerMillion: Double? = null
+    var lookupInputTokens: Long = 0
+    var lookupOutputTokens: Long = 0
+    var source: String = ""
+    var checkedAt: Long = 0
+    var status: String = ""
+}
+
+@State(name = "TellForgeAISettings", storages = [Storage("tellforgeai.xml")])
+class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> {
+
+    class State {
+        var profiles: MutableList<ProviderProfile> = mutableListOf()
+        /** Whether command execution requires explicit user approval. */
+        var askBeforeRunCommands: Boolean = true
+        /** Max seconds a terminal command may run before being killed. */
+        var commandTimeoutSeconds: Int = 30
+        /** Web-search backend: "duckduckgo" (keyless) or "brave" (needs API key). */
+        var webSearchProvider: String = "duckduckgo"
+        /** Explicit opt-in: use the selected LLM for a billable model-pricing lookup. */
+        var aiPricingLookupEnabled: Boolean = false
+        /** Provider/model keyed pricing and context lookup cache; entries expire after one day. */
+        var modelInfoCache: MutableList<ModelInfoCacheEntry> = mutableListOf()
+        /**
+         * Persistent cache of resolved absolute paths for bare command names
+         * (e.g. "php" -> "/opt/homebrew/bin/php"). Populated by CommandResolver
+         * after a successful probe; entries are re-validated on every use and
+         * dropped when stale.
+         */
+        var commandPaths: MutableMap<String, String> = mutableMapOf()
+    }
+
+    private var state = State()
+
+    override fun getState(): State = state
+
+    override fun loadState(state: State) {
+        this.state = state
+    }
+
+    fun profiles(): List<ProviderProfile> = state.profiles.toList()
+
+    fun upsert(profile: ProviderProfile) {
+        val idx = state.profiles.indexOfFirst { it.id == profile.id }
+        if (idx >= 0) state.profiles[idx] = profile else state.profiles.add(profile)
+    }
+
+    fun delete(id: String) {
+        state.profiles.removeAll { it.id == id }
+    }
+
+    fun find(id: String?): ProviderProfile? = state.profiles.firstOrNull { it.id == id }
+
+    fun askBeforeRunCommands(): Boolean = state.askBeforeRunCommands
+
+    fun setAskBeforeRunCommands(value: Boolean) {
+        state.askBeforeRunCommands = value
+    }
+
+    fun commandTimeoutSeconds(): Int = state.commandTimeoutSeconds.coerceIn(5, 600)
+
+    fun commandPath(name: String): String? = state.commandPaths[name]
+
+    fun setCommandPath(name: String, path: String?) {
+        if (path == null) state.commandPaths.remove(name) else state.commandPaths[name] = path
+    }
+
+    fun setCommandTimeoutSeconds(value: Int) {
+        state.commandTimeoutSeconds = value.coerceIn(5, 600)
+    }
+
+    fun webSearchProvider(): String = state.webSearchProvider
+
+    fun setWebSearchProvider(value: String) {
+        state.webSearchProvider = value
+    }
+
+    fun aiPricingLookupEnabled(): Boolean = state.aiPricingLookupEnabled
+
+    fun setAiPricingLookupEnabled(value: Boolean) {
+        state.aiPricingLookupEnabled = value
+    }
+
+    fun modelInfoCache(key: String): ModelInfoCacheEntry? =
+        state.modelInfoCache.firstOrNull {
+            it.key == key && it.status.isNotBlank() && it.status != "Fetching" &&
+                System.currentTimeMillis() - it.checkedAt < 24 * 60 * 60 * 1000L
+        }
+
+    fun expiredModelInfoCache(key: String): ModelInfoCacheEntry? =
+        state.modelInfoCache.firstOrNull { it.key == key }
+
+    fun putModelInfoCache(entry: ModelInfoCacheEntry) {
+        state.modelInfoCache.removeAll { it.key == entry.key }
+        state.modelInfoCache.add(entry)
+        state.modelInfoCache.removeAll { System.currentTimeMillis() - it.checkedAt >= 7 * 24 * 60 * 60 * 1000L }
+    }
+
+    companion object {
+        @JvmStatic
+        fun getInstance(): TellForgeAISettings =
+            ApplicationManager.getApplication()
+                .getService(TellForgeAISettings::class.java)
+    }
+}

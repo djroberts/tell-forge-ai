@@ -1,0 +1,19 @@
+<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+  <title>TellForgeAI anvil</title>
+  <defs>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#E8F2FA"/>
+      <stop offset="0.52" stop-color="#91A9BD"/>
+      <stop offset="1" stop-color="#526A80"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#79F2D2"/>
+      <stop offset="1" stop-color="#24BFA4"/>
+    </linearGradient>
+  </defs>
+  <path d="M7 9.5 11.5 5h17L33 9.5l-3.2 4H23v5.2l5.5 4.6 3.7 7.7H8l3.7-7.7 5.5-4.6v-5.2h-7z" fill="url(#steel)" stroke="#26394B" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M11.7 9.4h16.6l-1.5 2H13.2z" fill="#F4FBFF" opacity=".85"/>
+  <path d="M17.2 18.7h5.6v2.1h-5.6z" fill="#526A80"/>
+  <path d="M10.7 29h18.6l1.5 3H9.2z" fill="url(#glow)" stroke="#183A43" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M14 29.4h12" stroke="#D5FFF5" stroke-width="1" stroke-linecap="round" opacity=".8"/>
+</svg>

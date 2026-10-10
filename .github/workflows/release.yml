@@ -1,0 +1,216 @@
+# ============================================================================
+#  Release Workflow — forged for TellForgeAI
+#  ---------------------------------------------------------------
+#  One workflow to rule them all:
+#    * Runs on every push / merge to main
+#    * Reads Conventional Commits since the last version tag
+#    * Computes the next semver (fix -> patch, feat -> minor, feat!/BREAKING
+#      CHANGE -> major, otherwise no release)
+#    * Builds the plugin zip with that version
+#    * Tags the commit and attaches the zip to a GitHub Release with
+#      auto-generated release notes
+#
+#  The version lives in the tag, NOT in the code. You never touch it.
+#  Your only duty: merge PRs with titles like "feat: ..." / "fix: ...".
+# ============================================================================
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Force a specific version (e.g. 2.3.4). Leave empty to auto-compute.'
+        required: false
+        type: string
+      skip_bump:
+        description: 'Re-release the current version (no bump)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Version, build & publish
+    runs-on: ubuntu-latest
+    steps:
+      # ------------------------------------------------------------------
+      # Full history is required: we diff commits against the last tag.
+      # ------------------------------------------------------------------
+      - name: Forge checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      # ------------------------------------------------------------------
+      # Read the Eye: determine the next version from Conventional Commits
+      # ------------------------------------------------------------------
+      - name: Gaze into the Palantír (compute next version)
+        id: version
+        env:
+          FORCE_VERSION: ${{ inputs.force_version }}
+          SKIP_BUMP: ${{ inputs.skip_bump }}
+        run: |
+          set -euo pipefail
+
+          # ---- locate the last version tag --------------------------------
+          LAST_TAG="$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || true)"
+          if [ -z "$LAST_TAG" ]; then
+            LAST_TAG=""
+            MAJOR=0; MINOR=1; PATCH=0   # first release ever -> v0.1.0
+            echo "No previous tag found. Forging first version v0.1.0"
+          else
+            BASE="${LAST_TAG#v}"
+            MAJOR="$(cut -d. -f1 <<<"$BASE")"
+            MINOR="$(cut -d. -f2 <<<"$BASE")"
+            PATCH="$(cut -d. -f3 <<<"$BASE")"
+            echo "Last tag: $LAST_TAG"
+          fi
+
+          # ---- collect commits since the last tag -------------------------
+          if [ -z "$LAST_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="$LAST_TAG..HEAD"
+          fi
+          COMMITS="$(git log "$RANGE" --pretty=format:'%s%n%b%n---COMMIT-END---')"
+
+          # ---- inspect the commit bodies for the ring of power ------------
+          # Patch wins over nothing, minor over patch, major over all.
+          BUMP="none"
+          while IFS= read -r line; do
+            case "$line" in
+              # BREAKING CHANGE: footer in the body, or major scopes
+              BREAKING\ CHANGE:*|feat!:*|fix!:*|refactor!:*|perf!:*|chore!:*)
+                BUMP="major" ;;
+              feat:*)
+                [ "$BUMP" = "patch" ] || [ "$BUMP" = "none" ] && BUMP="minor"
+                true ;;
+              fix:*)
+                [ "$BUMP" = "none" ] && BUMP="patch"
+                true ;;
+            esac
+            [ "$BUMP" = "major" ] && break
+          done <<< "$COMMITS"
+
+          echo "Commits inspected -> bump: $BUMP"
+
+          # ---- honor manual overrides (workflow_dispatch) -----------------
+          if [ -n "$FORCE_VERSION" ]; then
+            VERSION="$FORCE_VERSION"
+            echo "Version forced by the Dark Lord: v$VERSION"
+          elif [ "$SKIP_BUMP" = "true" ]; then
+            if [ -z "$LAST_TAG" ]; then
+              echo "::error::skip_bump requested but no tag exists yet."
+              exit 1
+            fi
+            VERSION="$BASE"
+            echo "Re-releasing current version v$VERSION"
+          else
+            if [ "$BUMP" = "none" ]; then
+              echo "::notice::No conventional commits (feat/fix) since $LAST_TAG. Nothing to release."
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            VERSION="$MAJOR.$MINOR.$PATCH"
+            echo "Forged new version: v$VERSION ($BUMP)"
+          fi
+
+          # ---- guard against tag collisions -------------------------------
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists. Refusing to overwrite."
+            exit 1
+          fi
+
+          echo "version=$VERSION"        >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP"              >> "$GITHUB_OUTPUT"
+          echo "release=true"            >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # Nothing worth releasing — go quietly into the West.
+      # ------------------------------------------------------------------
+      - name: Withdraw from battle (nothing to release)
+        if: steps.version.outputs.release != 'true'
+        run: echo "No release needed for this push. Version stays at $(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || echo 'unversioned')."
+
+      # ------------------------------------------------------------------
+      # Build the One Plugin (version injected via -PpluginVersion)
+      # ------------------------------------------------------------------
+      - name: Summon Java 21
+        if: steps.version.outputs.release == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        if: steps.version.outputs.release == 'true'
+        uses: gradle/actions/setup-gradle@v4
+
+      # ------------------------------------------------------------------
+      # Run the test suite. A failure here aborts the job: no build, no
+      # tag, no release.
+      # ------------------------------------------------------------------
+      - name: Run tests (release gate)
+        if: steps.version.outputs.release == 'true'
+        run: ./gradlew test --stacktrace
+
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-test-report
+          path: build/reports/tests/test
+          retention-days: 7
+
+      - name: Forge the plugin
+        if: steps.version.outputs.release == 'true'
+        run: ./gradlew buildPlugin -PpluginVersion=${{ steps.version.outputs.version }} --stacktrace
+
+      # ------------------------------------------------------------------
+      # Publish to the JetBrains Marketplace.
+      # DISABLED for now — re-enable by flipping `enabled` below once the
+      # JETBRAINS_TOKEN secret and the marketplace listing are set up.
+      # ------------------------------------------------------------------
+      - name: Publish to JetBrains Marketplace
+        if: false && steps.version.outputs.release == 'true' && env.JETBRAINS_TOKEN != ''
+        env:
+          JETBRAINS_TOKEN: ${{ secrets.JETBRAINS_TOKEN }}
+        run: >
+          ./gradlew publishPlugin -PpluginVersion=${{ steps.version.outputs.version }}
+          -PmarketplaceToken=${{ secrets.JETBRAINS_TOKEN }}
+          --stacktrace
+
+      # ------------------------------------------------------------------
+      # Tag & publish — cast the zip into the fire (GitHub Releases)
+      # ------------------------------------------------------------------
+      - name: Cast into the fires of Mount Doom (tag & release)
+        if: steps.version.outputs.release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: TellForgeAI v${{ steps.version.outputs.version }}
+          body: |
+            Automated release ${{ steps.version.outputs.version }} (${{ steps.version.outputs.bump }} bump).
+
+            Built from commit ${{ github.sha }}.
+          generate_release_notes: true
+          files: build/distributions/*.zip
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
