@@ -1103,26 +1103,13 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 val results = calls.map { call ->
                     val result = ToolRegistry.execute(
                         project, call.name, call.arguments, mode == Mode.PLAN,
+                        onDownloadRequested = { request ->
+                            requestApproval("TellForgeAI wants to download a binary file:\n\n$request\n\nAllow?", "Download binary")
+                        },
                     ) { command ->
                         // If the user disabled the approval prompt, run without asking.
                         if (!askPermissionCheckBox.isSelected) return@execute true
-                        // Approval dialog must run on the EDT; block the worker until answered.
-                        val approved = java.util.concurrent.atomic.AtomicBoolean(false)
-                        val latch = java.util.concurrent.CountDownLatch(1)
-                        ApplicationManager.getApplication().invokeLater {
-                            approved.set(
-                                Messages.showYesNoDialog(
-                                    project,
-                                    "TellForgeAI wants to run this command:\n\n$command\n\nAllow?",
-                                    "TellForgeAI — Run command",
-                                    Messages.getQuestionIcon(),
-                                ) == Messages.YES
-                            )
-                            latch.countDown()
-                        }
-                        // Timeout so a lost dialog can't wedge the tool thread forever.
-                        latch.await(120, java.util.concurrent.TimeUnit.SECONDS)
-                        approved.get()
+                        requestApproval("TellForgeAI wants to run this command:\n\n$command\n\nAllow?", "Run command")
                     }
                     call to result
                 }
@@ -1296,6 +1283,26 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         finishAssistantBlock()
         setStreaming(false)
         appendSystem("Stopped.")
+    }
+
+    private fun requestApproval(message: String, title: String): Boolean {
+        val approved = java.util.concurrent.atomic.AtomicBoolean(false)
+        val latch = java.util.concurrent.CountDownLatch(1)
+        ApplicationManager.getApplication().invokeLater {
+            try {
+                approved.set(
+                    Messages.showYesNoDialog(
+                        project,
+                        message,
+                        "TellForgeAI — $title",
+                        Messages.getQuestionIcon(),
+                    ) == Messages.YES
+                )
+            } finally {
+                latch.countDown()
+            }
+        }
+        return latch.await(120, java.util.concurrent.TimeUnit.SECONDS) && approved.get()
     }
 
     private fun setStreaming(s: Boolean) {

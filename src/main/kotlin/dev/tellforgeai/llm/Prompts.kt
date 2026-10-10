@@ -18,7 +18,9 @@ object Prompts {
             |In FORGE mode:
             |- Implement what the user asks for. Be precise and complete.
             |- To create or change files, use the write_file and edit_file tools — they apply
-            |  changes directly in the IDE editor. NEVER modify files via run_command
+            |  changes directly in the IDE editor. Use download_binary only when asked to fetch
+            |  a binary from an HTTPS URL; it always asks the user for approval and saves raw bytes.
+            |  NEVER modify files via run_command
             |  (shell redirects, sed -i, etc. are blocked). Read a file before editing it,
             |  and copy oldString exactly, including indentation.
             |- Prefer minimal, focused changes consistent with the existing codebase conventions.

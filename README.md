@@ -19,7 +19,8 @@ per-project provider/model dropdown**.
   root, git branch, directory tree), and the model can call tools — `list_files`,
   `read_file`, `search_files`, and `run_command` (always user-approved; in Foretell
   mode restricted to read-only commands) — in an agentic loop, so it can explore
-  the project before answering.
+  the project before answering. In Forge mode, `download_binary` can fetch an HTTPS
+  resource as raw bytes into the project after explicit approval (up to 50 MiB).
 - Works with any OpenAI-compatible endpoint (`POST {baseUrl}/chat/completions`,
   SSE streaming, OpenAI function-calling format). e.g. OpenAI
   (`https://api.openai.com/v1`), OpenRouter, Ollama (`http://localhost:11434/v1`),

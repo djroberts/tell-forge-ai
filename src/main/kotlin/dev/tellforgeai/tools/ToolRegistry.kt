@@ -87,6 +87,18 @@ object ToolRegistry {
         ),
         // File-modification tools exist only in Forge mode and go through the IDE editor.
         if (!planMode) spec(
+            "download_binary",
+            "Download a binary file from an HTTPS URL into the project. This tool is available " +
+                "only in Forge mode and always requires explicit user approval. Saves raw response " +
+                "bytes without executing or unpacking them; maximum size is 50 MiB. HTTPS redirects " +
+                "are followed only when they remain HTTPS.",
+            jsonObjectProps(
+                "url" to "HTTPS URL of the file to download.",
+                "path" to "Destination file path relative to the project root.",
+            ),
+            required = listOf("url", "path"),
+        ) else null,
+        if (!planMode) spec(
             "write_file",
             "Create a new file or completely overwrite an existing one, applying the change " +
                 "directly in the IDE editor (undoable). For targeted changes prefer edit_file.",
@@ -139,15 +151,15 @@ object ToolRegistry {
     private fun jsonObjectProps(vararg pairs: Pair<String, String>) = pairs.toMap()
 
     /**
-     * Executes a tool call. Runs on a background thread. [onCommandRequested] is
-     * invoked before any command runs so the UI can show an approval dialog;
-     * returning false declines the execution.
+     * Executes a tool call on a background thread. Command and download approval
+     * callbacks run before their respective operations; returning false declines.
      */
     fun execute(
         project: Project,
         name: String,
         argumentsJson: String,
         planMode: Boolean,
+        onDownloadRequested: ((String) -> Boolean)? = null,
         onCommandRequested: (String) -> Boolean,
     ): String = try {
         val args: JsonObject = if (argumentsJson.isBlank()) JsonObject(emptyMap())
@@ -158,6 +170,8 @@ object ToolRegistry {
             "search_files" -> VfsTools.searchFiles(project, args)
             "web_search" -> WebSearchTool.search(args)
             "run_command" -> CommandTool.run(project, args, planMode, onCommandRequested)
+            "download_binary" -> if (planMode) notAllowedInPlan(name)
+                else DownloadBinaryTool.download(project, args, onDownloadRequested ?: { false })
             "write_file" -> if (planMode) notAllowedInPlan(name) else EditorTools.writeFile(project, args)
             "edit_file" -> if (planMode) notAllowedInPlan(name) else EditorTools.editFile(project, args)
             else -> "Error: unknown tool '$name'"
