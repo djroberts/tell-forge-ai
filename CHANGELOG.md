@@ -3,8 +3,8 @@
 All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-## [Unreleased]
 
+## [0.4.0] - 2026-10-12
 ### Added
 - Download binary files from HTTPS URLs into the project with explicit approval (tools)
 
