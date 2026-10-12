@@ -6,9 +6,8 @@ plugins {
 }
 
 group = "dev.tellforgeai"
-// Version is injected at build time by the release workflow
-// (-PpluginVersion=x.y.z, taken from the git tag). Local builds keep a
-// dev version so you never have to maintain a version number by hand.
+// Release builds receive the version parsed from CHANGELOG.md via
+// -PpluginVersion=x.y.z. Local builds keep a dev version.
 version = providers.gradleProperty("pluginVersion")
     .orElse(System.getenv("GITHUB_REF_NAME")?.removePrefix("v") ?: "0.0.0-dev")
     .get()

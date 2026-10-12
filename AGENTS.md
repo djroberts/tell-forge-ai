@@ -17,28 +17,19 @@ Use a scope when it helps identify the affected area (for example, `tools`, `set
 - `docs`: changes documentation
 - `chore`: maintenance or tooling changes
 
-The release workflow parses Conventional Commit subjects: `fix` triggers a patch release, `feat` a minor release, and `!` or a `BREAKING CHANGE:` footer a major release. Use `feat` or `fix` only when that release impact is intended; docs, tests, refactors, and chores do not trigger a release on their own.
+The release workflow is triggered by changes to `CHANGELOG.md` on `main`. It reads the newest dated `## [X.Y.Z] - YYYY-MM-DD` section and releases that exact version; it does not infer versions from commit messages or update/push commits to `main`. Use a new, increasing version heading to request a release. If its tag already exists, the workflow skips publishing.
 
 ## Changelog
 
-`CHANGELOG.md` (Keep a Changelog format) is the single source of truth for
-release notes. The release workflow turns the `## [Unreleased]` section into
-a dated `## [X.Y.Z]` section and uses it as the GitHub Release body — it is
-never edited by the workflow beyond that cut.
+`CHANGELOG.md` (Keep a Changelog format) is the source of truth for both release notes and the release version.
 
-When creating a commit that includes user-facing changes (any `feat:` or
-`fix:`), update the `## [Unreleased]` section in the **same commit**:
+When creating a commit that includes user-facing changes (any `feat:` or `fix:`), update the `## [Unreleased]` section in the **same commit**:
 
-- Add one bullet under the matching subsection: `### Added`, `### Changed`,
-  `### Fixed`, or `### Removed` (create the subsection if it does not exist).
-- Write bullets from the user's perspective: imperative, concise, one change
-  per bullet. Mention the affected area (tool window, providers, tools, …).
-  Commit hashes and type prefixes like `feat(ui):` are optional in
-  parentheses, never in the bullet text itself.
-- Never modify already-released sections, and never add an `## [X.Y.Z]`
-  section yourself — the release workflow does that.
-- `docs:`, `test:`, `refactor:`, and `chore:` commits do not need changelog
-  entries (unless they change user-visible behavior or the build artifacts).
+- Add one bullet under the matching subsection: `### Added`, `### Changed`, `### Fixed`, or `### Removed` (create the subsection if it does not exist).
+- Write bullets from the user's perspective: imperative, concise, one change per bullet. Mention the affected area (tool window, providers, tools, …). Commit hashes and type prefixes like `feat(ui):` are optional in parentheses, never in the bullet text itself.
+- Never modify already-released sections. Only the person intentionally preparing a release adds a dated `## [X.Y.Z] - YYYY-MM-DD` section, above prior released sections and below `## [Unreleased]`. That change requests the release of that exact version.
+- Keep `## [Unreleased]` at the top for future changes after a release entry is added.
+- `docs:`, `test:`, `refactor:`, and `chore:` commits do not need changelog entries (unless they change user-visible behavior or build artifacts).
 
 Example:
 
@@ -50,6 +41,9 @@ Example:
 
 ### Fixed
 - Chat panel no longer loses scroll position on streaming updates (ui)
+
+## [0.4.0] - 2026-10-18
+- User-curated release notes for version 0.4.0
 ```
 
 ## Project context and conventions

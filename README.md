@@ -29,7 +29,7 @@ per-project provider/model dropdown**.
 ## Building
 
 ```bash
-./gradlew buildPlugin        # -> build/distributions/tellforgeai-0.1.0.zip
+./gradlew buildPlugin        # -> build/distributions/tellforgeai-0.0.0-dev.zip
 ./gradlew runIde             # sandbox IDE for development
 ```
 
@@ -41,26 +41,30 @@ Download the latest zip from [GitHub Releases](https://github.com/djroberts/tell
 (*Assets* → `tellforgeai-x.y.z.zip`), then in the IDE: *Settings → Plugins → ⚙ →
 Install Plugin from Disk…*.
 
-## Releasing (fully automated)
+## Releasing
 
-Merges to `main` are versioned and released automatically:
+The release version and notes are maintained by a person in `CHANGELOG.md`; GitHub Actions does not calculate or change the version.
 
-- PR title starting with `fix:` → patch bump (`0.1.0` → `0.1.1`)
-- `feat:` → minor bump (`0.1.0` → `0.2.0`)
-- `feat!:` (or a `BREAKING CHANGE:` footer) → major bump (`0.1.0` → `2.0.0`)
-- No `feat:`/`fix:` commits since the last tag → no release
+To prepare a release, add a dated version section immediately below `## [Unreleased]`, for example:
 
-The workflow builds the plugin, tags the commit (`vX.Y.Z`) and attaches the zip
-to a GitHub Release with auto-generated notes. The version lives in the tag —
-no version file to maintain.
+```markdown
+## [Unreleased]
+
+### Added
+- Changes planned for a later release
+
+## [0.4.0] - 2026-10-18
+### Added
+- Add the user-curated notes for version 0.4.0
+```
+
+Commit and push this changelog change to `main`. The release workflow reads the newest dated version section, validates it against existing version tags, runs tests, builds the plugin with that version, and creates a GitHub Release with the section's notes and the plugin zip. It tags the same commit with `vX.Y.Z`. It does **not** commit or push anything to `main`. An existing tag for the selected version is treated as already released and is skipped. Keep `## [Unreleased]` at the top to collect changes after the release.
+
+The version is passed to Gradle as `-PpluginVersion=X.Y.Z` at release-build time; `CHANGELOG.md` is the only manually maintained release-version source.
 
 ## Changelog
 
-Release notes live in [CHANGELOG.md](CHANGELOG.md). During development, changes
-accumulate under `## [Unreleased]` — every `feat:`/`fix:` commit updates it
-(see `AGENTS.md` for the exact rules). When the release workflow cuts a
-version, it converts `Unreleased` into a dated `## [X.Y.Z]` section, commits
-that, and uses it as the GitHub Release notes.
+See [CHANGELOG.md](CHANGELOG.md). Add user-facing changes under `## [Unreleased]`; only add a dated version section when deliberately preparing that release. See `AGENTS.md` for contributor instructions.
 
 ## Roadmap (full agentic core, next phase)
 
