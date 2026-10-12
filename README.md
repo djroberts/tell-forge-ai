@@ -21,6 +21,7 @@ per-project provider/model dropdown**.
   mode restricted to read-only commands) — in an agentic loop, so it can explore
   the project before answering. In Forge mode, `download_binary` can fetch an HTTPS
   resource as raw bytes into the project after explicit approval (up to 50 MiB).
+- **Automatic context compaction**: when a known context window reaches 80% usage, older completed turns are summarized for future requests. The full transcript remains in chat history; ordinary history trimming is used if summarization fails.
 - Works with any OpenAI-compatible endpoint (`POST {baseUrl}/chat/completions`,
   SSE streaming, OpenAI function-calling format). e.g. OpenAI
   (`https://api.openai.com/v1`), OpenRouter, Ollama (`http://localhost:11434/v1`),

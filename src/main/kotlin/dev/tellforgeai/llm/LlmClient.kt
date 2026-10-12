@@ -4,7 +4,11 @@ import dev.tellforgeai.model.ApiProtocol
 import dev.tellforgeai.model.ProviderProfile
 import dev.tellforgeai.settings.ApiKeyStore
 import kotlinx.serialization.json.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * Dispatches requests to the connector matching the profile's configured
@@ -37,6 +41,9 @@ class LlmClient {
 
     private val chatCompletions = ChatCompletionsConnector()
     private val responses = OpenaiResponsesConnector()
+    private val helperScope = kotlinx.coroutines.CoroutineScope(
+        Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
+    )
 
     private fun getClient(protocol: ApiProtocol): LlmConnector = when (protocol.connector) {
         ApiProtocol.OPENAI_RESPONSES -> responses
@@ -54,6 +61,73 @@ class LlmClient {
     fun whenIdle(action: () -> Unit) {
         val busy = listOf(chatCompletions, responses).firstOrNull { it.isRunning() }
         if (busy == null) action() else busy.whenIdle(action)
+    }
+
+    /** Requests a non-streaming, tool-free summary using the same provider and selected mode model. */
+    fun summarize(
+        profile: ProviderProfile,
+        planMode: Boolean,
+        messages: List<ChatMessage>,
+        maxTokens: Int,
+        onResult: (Result<String>) -> Unit,
+    ) {
+        helperScope.launch {
+            try {
+                val model = profile.modelFor(planMode)
+                val apiKey = ApiKeyStore.get(profile.id).orEmpty()
+                val responsesApi = profile.apiProtocol.connector == ApiProtocol.OPENAI_RESPONSES
+                val requestJson = if (responsesApi) {
+                    buildJsonObject {
+                        put("model", model)
+                        put("input", JsonArray(messages.map { message ->
+                            buildJsonObject {
+                                put("role", if (message.role == "system") "developer" else message.role)
+                                put("content", message.content)
+                            }
+                        }))
+                        put("max_output_tokens", maxTokens.coerceAtLeast(128))
+                    }
+                } else {
+                    buildJsonObject {
+                        put("model", model)
+                        put("stream", false)
+                        put("messages", JsonArray(messages.map { message ->
+                            buildJsonObject {
+                                put("role", message.role)
+                                put("content", message.content)
+                            }
+                        }))
+                        put("max_tokens", maxTokens.coerceAtLeast(128))
+                    }
+                }
+                val requestBody = requestJson.toString().toRequestBody("application/json".toMediaType())
+                val endpoint = if (responsesApi) "/responses" else "/chat/completions"
+                val request = okhttp3.Request.Builder()
+                    .url(profile.trimmedBaseUrl() + endpoint)
+                    .header("Authorization", "Bearer $apiKey")
+                    .post(requestBody)
+                    .build()
+                Shared.http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) error("Summary request failed (HTTP ${response.code})")
+                    val root = Shared.json.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
+                    val text = if (responsesApi) {
+                        root["output_text"]?.jsonPrimitive?.contentOrNull
+                            ?: (root["output"] as? JsonArray)?.flatMap { item ->
+                                (item.jsonObject["content"] as? JsonArray).orEmpty().mapNotNull { part ->
+                                    part.jsonObject["text"]?.jsonPrimitive?.contentOrNull
+                                }
+                            }?.joinToString("\n")
+                    } else {
+                        root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+                            ?.get("message")?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull
+                    }
+                    if (text.isNullOrBlank()) error("Summary response contained no text")
+                    onResult(Result.success(text))
+                }
+            } catch (e: Exception) {
+                onResult(Result.failure(e))
+            }
+        }
     }
 
     fun stream(

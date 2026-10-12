@@ -17,6 +17,8 @@ import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
 import dev.tellforgeai.llm.ChatMessage
 import dev.tellforgeai.llm.ContextGuard
+import dev.tellforgeai.llm.ConversationCompactor
+import dev.tellforgeai.llm.estimatedTokens
 import dev.tellforgeai.llm.HistoryTrimmer
 import dev.tellforgeai.llm.LlmClient
 import dev.tellforgeai.llm.ModelInfoLookup
@@ -95,6 +97,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var contextFetchedAt = 0L
     /** Fires once per chat when trimming kicks in or the window is nearly full. */
     private var contextTrimNotified = false
+    /** Prevents duplicate asynchronous summaries while a turn is being prepared. */
+    private var compactionInProgress = false
+    private var compactionFailedForCurrentTurn = false
+    private var contextSummary = ""
+    private var compactedMessageCount = 0
     private val thinkingTimer: Timer = Timer(400) {
         thinkingDots = (thinkingDots + 1) % 4
         if (streaming && lastAssistantMarkdown.isEmpty()) {
@@ -577,6 +584,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         contextLookupModel = ""
         pricingLookupModel = ""
         history.clear()
+        contextSummary = ""
+        compactedMessageCount = 0
+        compactionInProgress = false
+        compactionFailedForCurrentTurn = false
         finishedBlocks.clear()
         renderedBlocks = 0
         lastAssistantMarkdown = StringBuilder()
@@ -620,6 +631,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         contextLookupModel = ""
         pricingLookupModel = ""
         contextTrimNotified = false
+        compactionInProgress = false
+        compactionFailedForCurrentTurn = false
+        contextSummary = chat.contextSummary
+        compactedMessageCount = chat.compactedMessageCount.coerceIn(0, chat.messages.size)
         chatModelInfoLabel.text = modelInfoLabel.text
         chatModelInfoLabel.toolTipText = modelInfoLabel.toolTipText
         history.clear()
@@ -664,6 +679,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         contextLookupModel = ""
         pricingLookupModel = ""
         contextTrimNotified = false
+        compactionInProgress = false
+        compactionFailedForCurrentTurn = false
+        contextSummary = ""
+        compactedMessageCount = 0
         history.clear()
         finishedBlocks.clear()
         renderedBlocks = 0
@@ -696,6 +715,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         val chat = state.get(id) ?: ChatSession.new("New chat").copy(id = id)
         chat.messages.clear()
         chat.messages.addAll(history)
+        chat.contextSummary = contextSummary
+        chat.compactedMessageCount = compactedMessageCount.coerceIn(0, history.size)
         chat.updatedAt = System.currentTimeMillis()
         chat.title = chat.autoTitle()
         state.upsert(chat)
@@ -958,6 +979,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
 
         history += ChatMessage.user(text).apply { this.images = images }
+        compactionFailedForCurrentTurn = false
         toolRounds = 0
         persistChat()
         appendUser(text, images)
@@ -980,7 +1002,52 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         // system prompt (with project context) is supplied fresh each request
         val context = buildProjectContext()
         val system = ChatMessage.system(Prompts.system(mode == Mode.PLAN, context))
-        val originalMessages = listOf(system) + history
+        val chatIdForCompaction = currentChatId
+        val window = contextWindow(profile)
+        val boundary = if (!compactionInProgress && !compactionFailedForCurrentTurn && window != null &&
+            ConversationCompactor.shouldCompact(lastPromptTokens, window)) {
+            ConversationCompactor.boundary(
+                history,
+                compactedMessageCount,
+                system.estimatedTokens() + contextSummary.length / 4 +
+                    (history.firstOrNull { it.role == "user" }?.estimatedTokens() ?: 0),
+                window,
+            )
+        } else null
+        if (boundary != null) {
+            compactionInProgress = true
+            val oldMessages = history.subList(compactedMessageCount.coerceIn(0, boundary), boundary)
+            val summaryInput = ConversationCompactor.summarizationMessages(oldMessages, contextSummary)
+            client.summarize(profile, mode == Mode.PLAN, summaryInput, (window!! * 0.12).toInt()) { result ->
+                ApplicationManager.getApplication().invokeLater {
+                    compactionInProgress = false
+                    if (currentChatId != chatIdForCompaction || !streaming) return@invokeLater
+                    if (currentChatId != null && history.size < boundary) return@invokeLater
+                    result.fold(
+                        onSuccess = { summary ->
+                            contextSummary = summary
+                            compactedMessageCount = boundary
+                            compactionFailedForCurrentTurn = true // at most one compaction attempt per user turn
+                            persistChat()
+                            appendSystem("ℹ Older conversation turns were compacted into a summary for future model requests; the full chat transcript is unchanged.")
+                            lastPromptTokens = 0
+                        },
+                        onFailure = { error ->
+                            LOG.warn("TellForgeAI conversation compaction failed; using normal history trimming", error)
+                            // Fall back to standard trimming rather than retrying this failed summary.
+                            compactionFailedForCurrentTurn = true
+                            lastPromptTokens = 0
+                        },
+                    )
+                    startTurn()
+                }
+            }
+            return
+        }
+        val summarizedMessages = ConversationCompactor.applySummary(
+            system, history, contextSummary, compactedMessageCount,
+        )
+        val originalMessages = summarizedMessages
         val budget = tokenBudget(profile)
         val messages = if (budget != null) {
             val fitted = HistoryTrimmer.fit(originalMessages, budget)

@@ -15,6 +15,7 @@
       <li>Optional second model for Foretell mode, per provider</li>
       <li>Agentic tool use: the model can list, read and search project files, and run terminal commands</li>
       <li>Reasoning-effort control and auto-detected context window with a usage meter</li>
+      <li>Automatic context compaction summarizes older turns while preserving the full chat transcript</li>
       <li>Persisted chat history per project</li>
     </ul>
 

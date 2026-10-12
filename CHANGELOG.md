@@ -3,11 +3,11 @@
 All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-<<<<<<< HEAD
-=======
 
-## [Unreleased]
->>>>>>> 9030662 (chore(release): use changelog version for releases)
+## [0.5.0] - 2026-10-12
+
+### Added
+- Automatically compact older completed conversation turns into a persisted summary when context usage reaches 80%; the full chat transcript remains intact and existing trimming is used if summarization fails
 
 ## [0.4.0] - 2026-10-12
 ### Added

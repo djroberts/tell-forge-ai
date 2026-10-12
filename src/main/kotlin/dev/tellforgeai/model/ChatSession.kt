@@ -16,6 +16,10 @@ data class ChatSession(
     var createdAt: Long = System.currentTimeMillis(),
     var updatedAt: Long = System.currentTimeMillis(),
     var messages: MutableList<dev.tellforgeai.llm.ChatMessage> = mutableListOf(),
+    /** Lossy model-generated summary of messages before compactedMessageCount; full messages remain intact. */
+    var contextSummary: String = "",
+    /** Number of leading messages represented by contextSummary. */
+    var compactedMessageCount: Int = 0,
     /** Provider-reported cumulative prompt/input tokens across every API round. */
     var incomingTokens: Long = 0,
     /** Subset of incoming tokens reported as cache reads by the provider. */
