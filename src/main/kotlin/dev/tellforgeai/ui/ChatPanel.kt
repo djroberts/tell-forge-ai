@@ -635,6 +635,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         compactionFailedForCurrentTurn = false
         contextSummary = chat.contextSummary
         compactedMessageCount = chat.compactedMessageCount.coerceIn(0, chat.messages.size)
+        lastPromptTokens = 0
+        toolRounds = 0
         chatModelInfoLabel.text = modelInfoLabel.text
         chatModelInfoLabel.toolTipText = modelInfoLabel.toolTipText
         history.clear()
@@ -683,6 +685,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         compactionFailedForCurrentTurn = false
         contextSummary = ""
         compactedMessageCount = 0
+        lastPromptTokens = 0
+        toolRounds = 0
         history.clear()
         finishedBlocks.clear()
         renderedBlocks = 0
