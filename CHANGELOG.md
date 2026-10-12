@@ -13,6 +13,9 @@ The `## [0.3.1] - 2026-10-10
 - Download binary files from HTTPS URLs into the project with explicit approval (tools)
 >>>>>>> aded50d (feat(tools): add approved binary downloads)
 
+### Fixed
+- Show all permitted Foretell commands in the rejection message (tools)
+
 ## [0.3.0] - 2026-10-10
 ### Added
 - CopyLink action in the chat panel (`feat(ui)`)

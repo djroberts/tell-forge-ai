@@ -41,6 +41,17 @@ object CommandTool {
     private val READ_ONLY_PREFIXES: List<String>
         get() = if (IS_WINDOWS) READ_ONLY_PREFIXES_WINDOWS else READ_ONLY_PREFIXES_UNIX
 
+    /** Whether a command starts with one of the prefixes permitted in Foretell mode. */
+    internal fun isReadOnlyCommand(command: String): Boolean =
+        READ_ONLY_PREFIXES.any { command.startsWith(it) }
+
+    /** Foretell rejection text includes every allowed prefix, avoiding a misleading abbreviated list. */
+    internal fun planModeRejection(command: String): String =
+        "Error: in Plan mode only read-only commands are allowed " +
+            "(${READ_ONLY_PREFIXES.joinToString(", ")}). '$command' was NOT executed.\n" +
+            "Tip: prefer the dedicated tools instead of shell commands — search_files to " +
+            "search file names/contents, read_file to read, list_files to explore."
+
     private val FORBIDDEN = listOf(
         "rm ", "rm\t", "rmdir ", "del ", "rd ", "sudo", "shutdown", "reboot", "mkfs",
         " dd ", "chmod ", "chown ", "format ", "diskpart", "reg add", "reg delete",
@@ -58,12 +69,8 @@ object CommandTool {
     ): String {
         val command = VfsTools.str(args, "command")?.trim()
             ?: throw IllegalArgumentException("command required")
-        if (planMode) {
-            val ok = READ_ONLY_PREFIXES.any { command.startsWith(it) }
-            if (!ok) return "Error: in Plan mode only read-only commands are allowed " +
-                "(${READ_ONLY_PREFIXES.take(12).joinToString(", ")} ...). '$command' was NOT executed.\n" +
-                "Tip: prefer the dedicated tools instead of shell commands — search_files to " +
-                "search file names/contents, read_file to read, list_files to explore."
+        if (planMode && !isReadOnlyCommand(command)) {
+            return planModeRejection(command)
         }
         // Strip escaped metacharacters (\| \; \& \` \$ etc. are literals in shell/regex,
         // not operators), then check for real injection patterns.
