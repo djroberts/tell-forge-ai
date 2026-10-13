@@ -63,15 +63,20 @@ object ToolRegistry {
                 "MUTATIONS ARE ALLOWED in Forge mode when the user asks for them: " +
                 "git add/commit/push, npm install, gradle build, git config and similar " +
                 "state-changing commands run fine as single commands. " +
-                "NEVER use pipes (|), redirects (>), command substitution (\$(...), backticks) or " +
-                "compound commands (;, &&, ||) — these are always refused even for read-only " +
-                "commands. Run a single simple command instead; if you need grep-like output " +
+                "NEVER use pipes (|), redirects (>, >>, 2>&1), command substitution (\$(...), " +
+                "backticks) or compound commands (;, &&, ||) — these are always refused even for " +
+                "read-only commands. You do NOT need '2>&1': BOTH stdout and stderr are captured " +
+                "automatically and returned together (stderr is labeled '[stderr]'), so plain " +
+                "output redirection only discards information.\n" +
+                "Run a single simple command instead; if you need grep-like output " +
                 "filtering, use search_files or read_file rather than 'grep ... | head'.\n" +
                 "Do NOT claim a mutation is impossible without first TRYING it: if the user " +
                 "is confident a command should work, run it once and report the real error " +
                 "instead of asserting tool restrictions from memory.\n" +
                 "Destructive commands (rm, sudo, force-push) still need explicit user request.",
-            jsonObjectProps("command" to "The shell command to execute. Single command only — no pipes, redirects, or command chaining."),
+            jsonObjectProps("command" to "The shell command to execute. A single plain command — " +
+                "no pipes, redirects (including 2>&1), or chaining. stdout and stderr are both " +
+                "returned automatically."),
             required = listOf("command"),
         ),
         spec(

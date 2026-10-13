@@ -54,8 +54,10 @@ object Prompts {
         |  etc.). read_file on such a path fails and listings/searches omit it — do not
         |  conclude a file "doesn't exist"; ask the user if you really need it.
         |- run_command is a last resort for things no dedicated tool does (git, npm, etc.).
-        |  It must be a SINGLE simple command: pipes (|), redirects (>), command
+        |  It must be a SINGLE plain command: pipes (|), redirects (> >> 2>&1), command
         |  substitution ($(...)) and chaining (;, &&) are always refused and will error.
+        |  Never add '2>&1' — stdout and stderr are both captured and returned
+        |  automatically, so appending redirects is always a mistake.
         |  Mutations (git add/commit/push, npm install, gradle build) ARE allowed in Forge
         |  mode when the user asks for them — run them, do not claim they are blocked.
         |  If a command is blocked, do NOT retry variations — switch to a dedicated tool.

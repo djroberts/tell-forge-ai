@@ -4,6 +4,11 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.3] - 2026-10-13
+
+### Fixed
+- Ignore-rule changes are now picked up without an IDE restart: `IgnoreRules` caches a fingerprint (name, last-modified, size) of each ignore file and `VfsTools` reloads rules automatically when `.gitignore` or an AI ignore file (`.aiignore`, `.cursorignore`, ...) is created or edited. Previously, a rule added after the first tool call was silently ignored until restart (`fix(tools)`)
+
 ## [0.5.2] - 2026-10-13
 
 ### Fixed

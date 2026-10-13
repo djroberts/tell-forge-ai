@@ -208,6 +208,26 @@ class IgnoreRulesTest {
         assertTrue(r2.isPathIgnored("foo.txt", false))
     }
 
+    @Test
+    fun `loadFresh detects ignore file edited after first load without invalidate`() {
+        val root = tmp.root
+        // first load caches rules with only .gitignore
+        File(root, ".gitignore").writeText("docs/\n")
+        val r1 = IgnoreRules.loadFresh(root)
+        assertTrue(r1.isPathIgnored("docs/x.txt", false))
+
+        // user later creates an .aiignore negating the rule (no invalidate called)
+        File(root, ".aiignore").writeText("!docs/\n!docs/**\n")
+        val r2 = IgnoreRules.loadFresh(root)
+        assertFalse(r2.isPathIgnored("docs/x.txt", false))
+        assertEquals(listOf(".gitignore", ".aiignore"), r2.sources)
+
+        // editing an existing file is detected too
+        File(root, ".aiignore").writeText("")
+        val r3 = IgnoreRules.loadFresh(root)
+        assertTrue(r3.isPathIgnored("docs/x.txt", false))
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------

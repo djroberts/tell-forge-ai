@@ -16,7 +16,7 @@ import java.io.File
  *   otherwise the pattern matches at any depth
  * - `*`, `?`, `[...]` single-level globs; `**` spans directories
  */
-class IgnoreRules private constructor(val sources: List<String>) {
+class IgnoreRules private constructor(val sources: List<String>, val fingerprint: String) {
 
     private data class Pattern(val regex: Regex, val dirOnly: Boolean, val negated: Boolean)
 
@@ -66,10 +66,30 @@ class IgnoreRules private constructor(val sources: List<String>) {
 
         fun invalidate(root: File) { cache.remove(root.canonicalPath) }
 
-        private fun read(root: File): IgnoreRules {
+        /**
+         * Load rules for [root], re-reading when an ignore file on disk changed since
+         * the cached instance was built (detected via last-modified fingerprints).
+         */
+        fun loadFresh(root: File): IgnoreRules {
+            val fp = fingerprint(root)
+            val cached = cache[root.canonicalPath]
+            if (cached != null && cached.fingerprint != fp) cache.remove(root.canonicalPath)
+            return cache.getOrPut(root.canonicalPath) { read(root, fp) }
+        }
+
+        private fun fingerprint(root: File): String =
+            ignoreFileNames().mapNotNull { name ->
+                File(root, name).takeIf { it.isFile }?.let { "$name:${it.lastModified()}:${it.length()}" }
+            }.joinToString("|")
+
+        private fun ignoreFileNames(): List<String> = listOf(GITIGNORE) + AI_IGNORE_FILES
+
+        private fun read(root: File): IgnoreRules = read(root, fingerprint(root))
+
+        private fun read(root: File, fp: String): IgnoreRules {
             val sources = mutableListOf<String>()
             val lines = mutableListOf<String>()
-            for (name in listOf(GITIGNORE) + AI_IGNORE_FILES) {
+            for (name in ignoreFileNames()) {
                 val f = File(root, name)
                 if (f.isFile) {
                     sources.add(name)
@@ -80,7 +100,7 @@ class IgnoreRules private constructor(val sources: List<String>) {
                 sources.add("(built-in defaults)")
                 lines.addAll(DEFAULT_PATTERNS)
             }
-            return IgnoreRules(sources.toList()).apply { patterns = lines.mapNotNull { compile(it) } }
+            return IgnoreRules(sources.toList(), fp).apply { patterns = lines.mapNotNull { compile(it) } }
         }
 
         private fun compile(line: String): Pattern? {

@@ -15,7 +15,7 @@ object VfsTools {
 
     fun root(project: Project): File = File(project.basePath ?: ".")
 
-    fun rules(project: Project): IgnoreRules = IgnoreRules.load(root(project))
+    fun rules(project: Project): IgnoreRules = IgnoreRules.loadFresh(root(project))
 
     fun rel(project: Project, f: File): String =
         f.relativeTo(root(project)).invariantSeparatorsPath.ifEmpty { "." }
@@ -26,7 +26,7 @@ object VfsTools {
         if (!f.path.startsWith(root(project).canonicalPath)) {
             throw IllegalArgumentException("Path '$p' is outside the project root")
         }
-        val r = IgnoreRules.load(root(project))
+        val r = IgnoreRules.loadFresh(root(project))
         val relNorm = rel(project, f)
         if (r.isPathIgnored(relNorm, f.isDirectory)) {
             val src = r.sources.joinToString(", ")
