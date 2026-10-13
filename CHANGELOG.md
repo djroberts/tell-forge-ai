@@ -4,6 +4,12 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.2] - 2026-10-13
+
+### Fixed
+- API keys no longer disappear after an IDE restart when the settings file is reset: known profile ids are now persisted, so the "Recover API keys" dialog actually offers orphaned PasswordSafe keys back instead of silently dropping them (`fix(settings)`)
+- Blank API-key fields no longer wipe stored PasswordSafe entries on Apply unless the key was deliberately cleared in the settings UI (`fix(settings)`)
+
 ## [0.5.1] - 2026-10-12
 
 ### Fixed

@@ -41,6 +41,12 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
          * dropped when stale.
          */
         var commandPaths: MutableMap<String, String> = mutableMapOf()
+        /**
+         * Ids of every profile ever applied. Survives a tellforgeai.xml profile
+         * list reset so orphaned PasswordSafe keys (entries whose profile was
+         * lost) can still be enumerated and offered back to the user.
+         */
+        var knownProfileIds: MutableSet<String> = mutableSetOf()
     }
 
     private var state = State()
@@ -63,6 +69,12 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
     }
 
     fun find(id: String?): ProviderProfile? = state.profiles.firstOrNull { it.id == id }
+
+    fun knownProfileIds(): Set<String> = state.knownProfileIds.toSet()
+
+    fun forgetProfileId(id: String) {
+        state.knownProfileIds.remove(id)
+    }
 
     fun askBeforeRunCommands(): Boolean = state.askBeforeRunCommands
 

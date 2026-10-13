@@ -65,7 +65,7 @@ The version is passed to Gradle as `-PpluginVersion=X.Y.Z` at release-build time
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md). Add user-facing changes under `## [Unreleased]`; only add a dated version section when deliberately preparing that release. See `AGENTS.md` for contributor instructions.
+See [CHANGELOG.md](CHANGELOG.md). Add user-facing changes under `## [Unreleased]`; when changes are ready to release, the AI agent decides the next version number itself (MINOR bump for features, PATCH for fixes) and converts `## [Unreleased]` into the dated version section — see `AGENTS.md` for contributor instructions.
 
 ## Roadmap (full agentic core, next phase)
 

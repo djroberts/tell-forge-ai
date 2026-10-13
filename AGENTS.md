@@ -27,7 +27,7 @@ When creating a commit that includes user-facing changes (any `feat:` or `fix:`)
 
 - Add one bullet under the matching subsection: `### Added`, `### Changed`, `### Fixed`, or `### Removed` (create the subsection if it does not exist).
 - Write bullets from the user's perspective: imperative, concise, one change per bullet. Mention the affected area (tool window, providers, tools, …). Commit hashes and type prefixes like `feat(ui):` are optional in parentheses, never in the bullet text itself.
-- Never modify already-released sections. Only the person intentionally preparing a release adds a dated `## [X.Y.Z] - YYYY-MM-DD` section, above prior released sections and below `## [Unreleased]`. That change requests the release of that exact version.
+- Never modify already-released sections. Only a dated `## [X.Y.Z] - YYYY-MM-DD` section, above prior released sections and below `## [Unreleased]`, requests the release of that exact version. **The AI agent decides the version number itself**: when user-facing changes are ready to release, the agent chooses the next appropriate version (bump MINOR for `feat:`, PATCH for `fix:`; MAJOR only on explicit user instruction) and replaces `## [Unreleased]` with the new dated heading in the same commit. Do not ask the user which version to use, and do not leave changes sitting under `## [Unreleased]` waiting for the user — making the version call is part of the agent's job.
 - Keep `## [Unreleased]` at the top for future changes after a release entry is added.
 - `docs:`, `test:`, `refactor:`, and `chore:` commits do not need changelog entries (unless they change user-visible behavior or build artifacts).
 

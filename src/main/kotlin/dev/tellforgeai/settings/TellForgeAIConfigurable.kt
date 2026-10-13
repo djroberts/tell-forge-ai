@@ -60,6 +60,8 @@ class TellForgeAIConfigurable : Configurable {
     private val deletedThisSession = mutableSetOf<String>()
     /** Orphaned ids deferred for possible re-adopt rather than hard deletion. */
     private val knownOrphanCandidates = mutableSetOf<String>()
+    /** Profile ids whose key the user explicitly cleared this session (blank field). */
+    private val clearedThisSession = mutableSetOf<String>()
     /**
      * Index of the profile currently shown in the form. Track it explicitly —
      * Swing often fires selection events during list mutation (add/delete),
@@ -87,7 +89,18 @@ class TellForgeAIConfigurable : Configurable {
         listOf(nameField, urlField, modelField, planModelField, reasoningEffortField, contextWindowField, timeoutField).forEach { field ->
             field.document.addDocumentListener(SimpleDocListener { modified = true })
         }
-        keyField.document.addDocumentListener(SimpleDocListener { modified = true })
+        keyField.document.addDocumentListener(
+            SimpleDocListener {
+                modified = true
+                // Only a deliberate user edit to blank counts as a key deletion;
+                // programmatic clears (reset/reload) must not wipe PasswordSafe.
+                if (keyField.password.isEmpty() && currentEditorIndex in 0 until listModel.size) {
+                    clearedThisSession.add(listModel[currentEditorIndex].id)
+                } else if (currentEditorIndex in 0 until listModel.size) {
+                    clearedThisSession.remove(listModel[currentEditorIndex].id)
+                }
+            }
+        )
         braveKeyField.document.addDocumentListener(SimpleDocListener { modified = true })
         webSearchProviderCombo.addActionListener { modified = true }
         webSearchProviderCombo.addActionListener {
@@ -364,9 +377,12 @@ class TellForgeAIConfigurable : Configurable {
      */
     private fun adoptOrphansIfAny() {
         val settings = TellForgeAISettings.getInstance()
-        // Candidate ids are remembered from previous apply() deferrals plus any
-        // key-bearing PasswordSafe entries we know of from prior sessions.
-        val candidates = knownOrphanCandidates.filter { ApiKeyStore.isOrphaned(settings, it) }
+        val liveIds = listModel.elements().toList().map { it.id }.toSet()
+        // Candidates: ids remembered across sessions (persisted in settings state)
+        // plus ones deferred during this session. Only those whose PasswordSafe
+        // entry still exists and whose profile is genuinely gone are orphans.
+        val candidates = (settings.knownProfileIds() + knownOrphanCandidates)
+            .filter { it !in liveIds && ApiKeyStore.isOrphaned(settings, it) }
         if (candidates.isEmpty()) return
         val msg = "TellForgeAI found ${candidates.size} API key(s) in the IDE PasswordSafe " +
             "with no matching provider profile (the settings file was likely reset).\n\n" +
@@ -385,6 +401,7 @@ class TellForgeAIConfigurable : Configurable {
             ApiKeyStore.set(p.id, key)
             ApiKeyStore.remove(id)
             settings.upsert(p)
+            settings.forgetProfileId(id)
             listModel.addElement(p.copy(apiKey = key))
         }
         knownOrphanCandidates.clear()
@@ -434,13 +451,22 @@ class TellForgeAIConfigurable : Configurable {
         val deletedIds = settings.profiles().map { it.id } - ids
         val deletable = deletedIds.filter { it in deletedThisSession || it !in knownOrphanCandidates }
         deletedIds.filter { it !in deletable }.forEach { knownOrphanCandidates.add(it) }
-        deletable.forEach { ApiKeyStore.remove(it) }
+        deletable.forEach {
+            ApiKeyStore.remove(it)
+            settings.forgetProfileId(it)
+        }
         settings.profiles().filter { it.id in deletedIds }.forEach { settings.delete(it.id) }
         // Persist API keys to the PasswordSafe; profiles themselves go to settings XML.
+        // A blank field only deletes the stored key when the user cleared it
+        // deliberately this session — otherwise a failed PasswordSafe read in
+        // reset() would come back as blank and wipe the key on Apply.
         listModel.elements().toList().forEach {
-            ApiKeyStore.set(it.id, it.apiKey)
+            if (it.apiKey.isNotBlank() || it.id in clearedThisSession) {
+                ApiKeyStore.set(it.id, it.apiKey)
+            }
             settings.upsert(it.copy(apiKey = ""))
         }
+        settings.state.knownProfileIds.addAll(ids)
         // Keep the key in the settings-session model so switching profiles after
         // Apply still displays it; it is only persisted to PasswordSafe, never XML.
         modified = false
