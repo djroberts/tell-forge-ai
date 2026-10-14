@@ -93,10 +93,11 @@ class TellForgeAIConfigurable : Configurable {
         }
         list.addListSelectionListener { onSelectionChanged() }
         listOf(nameField, urlField, modelField, planModelField, reasoningEffortField, contextWindowField, timeoutField).forEach { field ->
-            field.document.addDocumentListener(SimpleDocListener { modified = true })
+            field.document.addDocumentListener(SimpleDocListener { if (!suppressFieldListeners) modified = true })
         }
         keyField.document.addDocumentListener(
             SimpleDocListener {
+                if (suppressFieldListeners) return@SimpleDocListener
                 modified = true
                 // Only a deliberate user edit to blank counts as a key deletion;
                 // programmatic clears (reset/reload) must not wipe PasswordSafe.
@@ -107,15 +108,20 @@ class TellForgeAIConfigurable : Configurable {
                 }
             }
         )
-        braveKeyField.document.addDocumentListener(SimpleDocListener { modified = true })
-        webSearchProviderCombo.addActionListener { modified = true }
-        pastedImageSizeCombo.addActionListener { modified = true }
+        braveKeyField.document.addDocumentListener(SimpleDocListener { if (!suppressFieldListeners) modified = true })
+        // Single listener: toggles the Brave-key field's enabled state and marks
+        // the form modified — previously two separate addActionListener calls.
         webSearchProviderCombo.addActionListener {
+            if (suppressFieldListeners) return@addActionListener
+            modified = true
             braveKeyField.isEnabled = webSearchProviderCombo.selectedItem == "brave"
         }
+        pastedImageSizeCombo.addActionListener { if (!suppressFieldListeners) modified = true }
+        aiPricingLookupCheckBox.addActionListener { if (!suppressFieldListeners) modified = true }
         // API protocol: switching swaps the base-url default and toggles the
         // OpenRouter-specific options panel but never discards the user's URL.
         protocolCombo.addActionListener {
+            if (suppressFieldListeners) return@addActionListener
             modified = true
             val proto = ApiProtocol.entries.firstOrNull { it.displayName == protocolCombo.selectedItem }
             urlField.emptyText.text = proto?.defaultBaseUrl.orEmpty()
@@ -127,33 +133,79 @@ class TellForgeAIConfigurable : Configurable {
         // stays the source of truth, so users can still override.
         modelCombo.addActionListener {
             val sel = modelCombo.selectedItem as? String
-            if (suppressModelComboAction && sel != null) {
-                suppressModelComboAction = false
-            } else if (sel != null && sel != modelField.text.trim()) {
-                modelField.text = sel
-                modified = true
+            if (sel != null && sel != TRUNCATION_NOTICE) {
+                if (suppressModelComboAction) {
+                    suppressModelComboAction = false
+                } else if (sel != modelField.text.trim()) {
+                    modelField.text = sel
+                    modified = true
+                }
             }
         }
     }
 
-    /** Guards against the programmatic setSelectedItem during popup refresh. */
+    /**
+     * Guards against the programmatic setSelectedItem during popup refresh.
+     * When true, model-combo action events are ignored so that programmatically
+     * populated suggestions (including the truncation notice) are never written
+     * into [modelField].
+     */
     private var suppressModelComboAction = false
+
+    /**
+     * Suppresses the form's field-change listeners while fields are populated
+     * programmatically (selection switch, reset, global-field load). Without
+     * this, merely *viewing* a profile fired every listener and flipped
+     * [modified] — making Apply/OK always enabled and triggering spurious
+     * "unsaved changes" prompts with zero user edits.
+     */
+    private var suppressFieldListeners = false
+
+    /** Runs [block] with field listeners suppressed so loading state never dirties the form. */
+    private inline fun withoutFieldListeners(block: () -> Unit) {
+        suppressFieldListeners = true
+        try {
+            block()
+        } finally {
+            suppressFieldListeners = false
+        }
+    }
+
+    /** Null-safe element access on [DefaultListModel] (no built-in getOrNull). */
+    private fun DefaultListModel<ProviderProfile>.getOrNull(index: Int): ProviderProfile? =
+        if (index in 0 until size) this[index] else null
+
+    /** Sentinel combo item shown when /models returned ≥200 entries; never written into [modelField]. */
+    private companion object {
+        const val TRUNCATION_NOTICE = "\u2026 (list truncated at 200 — type in the field above)"
+    }
 
     /** Fetch /models (path per profile's protocol) and fill the suggestion combo. */
     private fun onFetchModels() {
         if (list.selectedIndex < 0) return
         saveEditsIntoSelected()
         val profile = list.selectedValue ?: return
+        // Capture the profile id: if the user switches to another profile while
+        // the request is in flight, the reply must not fill the form with this
+        // (now hidden) profile's model list.
+        val requestedProfileId = profile.id
         fetchModelsButton.isEnabled = false
         fetchModelsButton.text = "Fetching\u2026"
         testClient.fetchModelsWithApiKey(profile, profile.apiKey) { ids ->
             javax.swing.SwingUtilities.invokeLater {
+                if (list.selectedValue?.id != requestedProfileId) {
+                    // Stale reply — the form now shows a different profile.
+                    // Restore the button but drop the results.
+                    fetchModelsButton.isEnabled = true
+                    fetchModelsButton.text = "\u21c5 Fetch"
+                    return@invokeLater
+                }
                 fetchModelsButton.isEnabled = true
                 fetchModelsButton.text = "\u21c5 Fetch"
                 suppressModelComboAction = true
                 modelCombo.removeAllItems()
                 ids.forEach { modelCombo.addItem(it) }
-                if (ids.size >= 200) modelCombo.addItem("\u2026 (list truncated at 200 — type in the field above)")
+                if (ids.size >= 200) modelCombo.addItem(TRUNCATION_NOTICE)
                 suppressModelComboAction = false
                 if (ids.isEmpty()) {
                     // Empty result doesn't block the user — the field stays editable.
@@ -225,8 +277,16 @@ class TellForgeAIConfigurable : Configurable {
         center.add(labeled("Max pasted image size in px (longest side; Original = no resize; global)", pastedImageSizeCombo))
         aiPricingLookupCheckBox.addActionListener { modified = true }
         root.add(center, BorderLayout.CENTER)
-        loadGlobalFields()
-        if (!listModel.isEmpty) list.selectedIndex = 0 else setFormEnabled(false)
+        // Initial population is programmatic — must not flip [modified] or
+        // register cleared-key candidates before the user touches anything.
+        suppressFieldListeners = true
+        try {
+            loadGlobalFields()
+            if (!listModel.isEmpty) list.selectedIndex = 0
+        } finally {
+            suppressFieldListeners = false
+        }
+        if (listModel.isEmpty) setFormEnabled(false)
         return root
     }
 
@@ -280,6 +340,13 @@ class TellForgeAIConfigurable : Configurable {
         return wrapper
     }
 
+    /**
+     * Id of the profile currently shown in the form (mirrors [currentEditorIndex]
+     * but survives index shifts). Used to reset per-profile UI state — the model
+     * suggestions combo — when the user switches to a different profile.
+     */
+    private var shownProfileId: String? = null
+
     private fun onSelectionChanged() {
         val idx = list.selectedIndex
         // Data-loss fix: when switching profiles, first flush any unsaved edits
@@ -288,33 +355,60 @@ class TellForgeAIConfigurable : Configurable {
         // silently discarded, and a later Apply then persisted the stale/blank
         // values into PasswordSafe — wiping freshly-entered API keys.
         if (currentEditorIndex in 0 until listModel.size && currentEditorIndex != idx) {
-            flushEditsInto(currentEditorIndex)
+            // Flush the *previous* profile's pending edits — by id (indices may
+            // already have shifted in the event that triggered this callback).
+            flushEditsInto(listModel.getOrNull(currentEditorIndex)?.id)
         }
         currentEditorIndex = idx
         val p = list.selectedValue ?: return
-        nameField.text = p.name
-        protocolCombo.selectedItem = p.apiProtocol.displayName
-        urlField.text = p.baseUrl
-        // listModel is the source of truth for this settings session, including
-        // an intentionally-cleared or newly-entered key that has not been applied.
-        keyField.text = p.apiKey
-        modelField.text = p.model
-        planModelField.text = p.planModel.orEmpty()
-        reasoningEffortField.text = p.reasoningEffort.orEmpty()
-        contextWindowField.text = p.contextWindow.toString()
-        openRouterForm.load(p)
-        openRouterForm.root.isVisible = p.isOpenRouter
+        // Per-profile UI state reset: the /models suggestions combo is a cache of
+        // the last fetch for whichever profile was previously shown. Leaving it
+        // populated after a switch showed the old provider's models against the
+        // new one — a user picking an entry would silently save the wrong
+        // provider's model id into the new profile. Clear on any id change.
+        if (p.id != shownProfileId) {
+            shownProfileId = p.id
+            suppressModelComboAction = true
+            modelCombo.removeAllItems()
+            suppressModelComboAction = false
+        }
+        // Populate the fields programmatically — suppress the doc/checkbox/combo
+        // listeners so merely *viewing* a profile doesn't flip [modified].
+        suppressFieldListeners = true
+        try {
+            nameField.text = p.name
+            protocolCombo.selectedItem = p.apiProtocol.displayName
+            urlField.text = p.baseUrl
+            // listModel is the source of truth for this settings session, including
+            // an intentionally-cleared or newly-entered key that has not been applied.
+            keyField.text = p.apiKey
+            modelField.text = p.model
+            planModelField.text = p.planModel.orEmpty()
+            reasoningEffortField.text = p.reasoningEffort.orEmpty()
+            contextWindowField.text = p.contextWindow.toString()
+            openRouterForm.load(p)
+            openRouterForm.root.isVisible = p.isOpenRouter
+        } finally {
+            suppressFieldListeners = false
+        }
     }
 
     private fun onAdd() {
         // Flush pending edits into the previously selected profile before the
-        // selection jump (below) would otherwise discard them.
-        if (currentEditorIndex in 0 until listModel.size) flushEditsInto(currentEditorIndex)
+        // selection jump (below) would otherwise discard them — by id.
+        if (currentEditorIndex in 0 until listModel.size) {
+            flushEditsInto(listModel.getOrNull(currentEditorIndex)?.id)
+        }
         val p = ProviderProfile(
             id = UUID.randomUUID().toString(),
             name = "New provider",
+            // Seed the new profile with the protocol currently selected in the
+            // form (and its default base URL) — previously this hardcoded the
+            // OpenAI-compatible default even when the user had picked Gemini or
+            // OpenRouter, so the new profile landed on the wrong endpoint.
             apiProtocol = ApiProtocol.fromDisplayName(protocolCombo.selectedItem?.toString()),
-            baseUrl = ApiProtocol.OPENAI_COMPATIBLE.defaultBaseUrl,
+            baseUrl = ApiProtocol.fromDisplayName(protocolCombo.selectedItem?.toString())?.defaultBaseUrl
+                ?: ApiProtocol.OPENAI_COMPATIBLE.defaultBaseUrl,
             apiKey = "",
             model = "",
             planModel = null,
@@ -322,7 +416,23 @@ class TellForgeAIConfigurable : Configurable {
         listModel.addElement(p)
         list.selectedIndex = listModel.size - 1
         currentEditorIndex = listModel.size - 1
-        setFormEnabled(true)
+        // A brand-new profile has no fetched models — drop any suggestions left
+        // over from the previously shown profile. Cleared here defensively (not
+        // only via the selection callback) so the combo is guaranteed empty
+        // before the user sees the fresh form.
+        shownProfileId = null
+        suppressModelComboAction = true
+        modelCombo.removeAllItems()
+        suppressModelComboAction = false
+        // The selection jump above fires onSelectionChanged, which loads the new
+        // (empty) profile into the fields — that programmatic load must not flip
+        // [modified]; onAdd sets it explicitly below.
+        suppressFieldListeners = true
+        try {
+            setFormEnabled(true)
+        } finally {
+            suppressFieldListeners = false
+        }
         modified = true
         nameField.requestFocusInWindow()
         nameField.selectAll()
@@ -336,13 +446,22 @@ class TellForgeAIConfigurable : Configurable {
         modified = true
         currentEditorIndex = if (!listModel.isEmpty) idx.coerceAtMost(listModel.size - 1) else -1
         if (!listModel.isEmpty) list.selectedIndex = currentEditorIndex
-        else setFormEnabled(false)
+        else {
+            // No selection callback fires when the list empties — clear per-profile
+            // state (model suggestions) and disable the form explicitly.
+            shownProfileId = null
+            suppressModelComboAction = true
+            modelCombo.removeAllItems()
+            suppressModelComboAction = false
+            setFormEnabled(false)
+        }
     }
 
     private fun onTestConnection() {
         if (list.selectedIndex < 0) return
         saveEditsIntoSelected()
         val profile = list.selectedValue ?: return
+        val requestedProfileId = profile.id
         testButton.isEnabled = false
         testButton.text = "Testing…"
         testClient.testConnectionWithApiKey(profile, profile.apiKey) { result ->
@@ -351,6 +470,13 @@ class TellForgeAIConfigurable : Configurable {
             // the user hasn't entered a specific one (blank or the 128k default).
             testClient.fetchContextWindowWithApiKey(profile, apiKey = profile.apiKey) { detected ->
                 javax.swing.SwingUtilities.invokeLater {
+                    if (list.selectedValue?.id != requestedProfileId) {
+                        // Stale reply — the form now shows a different profile.
+                        // Restore the button but don't touch its fields.
+                        testButton.isEnabled = true
+                        testButton.text = "Test connection"
+                        return@invokeLater
+                    }
                     testButton.isEnabled = true
                     testButton.text = "Test connection"
                     val atDefault = contextWindowField.text.trim().let {
@@ -380,8 +506,11 @@ class TellForgeAIConfigurable : Configurable {
         }
     }
 
-    private fun saveEditsIntoSelected() {
-        if (currentEditorIndex in 0 until listModel.size) flushEditsInto(currentEditorIndex)
+    private fun saveEditsIntoSelected(warn: Boolean = false) {
+        // Flush the profile whose data is actually in the form ([shownProfileId],
+        // not a possibly-stale index) — indices shift during list mutation.
+        val id = shownProfileId ?: listModel.getOrNull(currentEditorIndex)?.id ?: return
+        flushEditsInto(id, warn)
     }
 
     /**
@@ -429,8 +558,36 @@ class TellForgeAIConfigurable : Configurable {
      * (which may need to flush an index other than `list.selectedIndex`)
      * can reuse it.
      */
-    private fun flushEditsInto(idx: Int) {
+    /**
+     * Writes the current form field values into the profile with [profileId].
+     * Kept separate from [saveEditsIntoSelected] so the selection-switch path
+     * (which may need to flush a profile other than `list.selectedValue`)
+     * can reuse it. Resolves the id to an index at flush time — indices shift
+     * during list mutation (add/delete), so flushing a stale index could write
+     * one profile's edits into another; ids are stable.
+     * Set [warn] only on the Apply path — `isModified()` flushes on every IDE
+     * poll and must never pop a modal dialog.
+     */
+    private fun flushEditsInto(profileId: String?, warn: Boolean = false) {
+        if (profileId == null) return
+        val idx = listModel.elements().toList().indexOfFirst { it.id == profileId }
+        if (idx !in 0 until listModel.size) return
         val old = listModel[idx]
+        val contextWindow = contextWindowField.text.trim().toIntOrNull()?.coerceAtLeast(1024) ?: run {
+            // Garbage or below-minimum context-window input: previously silently
+            // replaced by the default with no user feedback — the user believed
+            // their value was kept.
+            val entered = contextWindowField.text.trim()
+            if (warn && entered.isNotEmpty() && entered.toIntOrNull() == null) {
+                Messages.showWarningDialog(
+                    list,
+                    "\"$entered\" is not a valid context window in tokens — " +
+                        "keeping the default ${old.contextWindow}.",
+                    "TellForgeAI — Invalid context window",
+                )
+            }
+            128_000
+        }
         val updated = old.copy(
             name = nameField.text.trim(),
             apiProtocol = ApiProtocol.fromDisplayName(protocolCombo.selectedItem?.toString()),
@@ -439,7 +596,7 @@ class TellForgeAIConfigurable : Configurable {
             model = modelField.text.trim(),
             planModel = planModelField.text.trim().ifBlank { null },
             reasoningEffort = reasoningEffortField.text.trim().ifBlank { null },
-            contextWindow = contextWindowField.text.trim().toIntOrNull()?.coerceAtLeast(1024) ?: 128_000,
+            contextWindow = contextWindow,
         )
         // Save OpenRouter-specific fields if the protocol is OpenRouter
         openRouterForm.saveInto(updated)
@@ -452,9 +609,24 @@ class TellForgeAIConfigurable : Configurable {
     }
 
     override fun apply() {
-        saveEditsIntoSelected()
+        saveEditsIntoSelected(warn = true)
         val settings = TellForgeAISettings.getInstance()
-        timeoutField.text.trim().toIntOrNull()?.let { settings.setCommandTimeoutSeconds(it) }
+        val timeout = timeoutField.text.trim().toIntOrNull()?.coerceIn(5, 600) ?: run {
+            val entered = timeoutField.text.trim()
+            // The label promises 5–600 — previously any parseable value outside
+            // that range (or garbage) was silently applied/ignored with no
+            // feedback. Clamp valid values, warn on garbage.
+            if (entered.isNotEmpty() && entered.toIntOrNull() == null) {
+                Messages.showWarningDialog(
+                    list,
+                    "\"$entered\" is not a valid command timeout in seconds — " +
+                        "keeping the current ${settings.commandTimeoutSeconds()}s.",
+                    "TellForgeAI — Invalid timeout",
+                )
+            }
+            settings.commandTimeoutSeconds()
+        }
+        settings.setCommandTimeoutSeconds(timeout)
         settings.setWebSearchProvider(
             (webSearchProviderCombo.selectedItem as? String) ?: "duckduckgo"
         )
@@ -497,15 +669,37 @@ class TellForgeAIConfigurable : Configurable {
     }
 
     override fun reset() {
-        listModel.clear()
-        deletedThisSession.addAll(TellForgeAISettings.getInstance().profiles().map { it.id })
-        TellForgeAISettings.getInstance().profiles().forEach { p ->
-            listModel.addElement(p.copy(apiKey = ApiKeyStore.get(p.id).orEmpty()))
+        // Re-seed session-tracking state: previously these sets survived a reset,
+        // so a key cleared before Reset (then reloaded unchanged) still wiped the
+        // stored PasswordSafe entry on the next Apply, and orphan candidates were
+        // re-prompted with stale data.
+        deletedThisSession.clear()
+        clearedThisSession.clear()
+        knownOrphanCandidates.clear()
+        suppressFieldListeners = true
+        suppressModelComboAction = true
+        try {
+            listModel.clear()
+            deletedThisSession.addAll(TellForgeAISettings.getInstance().profiles().map { it.id })
+            TellForgeAISettings.getInstance().profiles().forEach { p ->
+                listModel.addElement(p.copy(apiKey = ApiKeyStore.get(p.id).orEmpty()))
+            }
+            currentEditorIndex = if (listModel.isEmpty) -1 else 0
+            if (!listModel.isEmpty) list.selectedIndex = 0
+            // Drop any model suggestions left over from the pre-reset session and
+            // invalidate the shown-profile tracker (re-established on selection).
+            shownProfileId = null
+            modelCombo.removeAllItems()
+            loadGlobalFields()
+        } finally {
+            suppressFieldListeners = false
+            suppressModelComboAction = false
         }
+        if (listModel.isEmpty) setFormEnabled(false)
+        // Offer orphaned PasswordSafe keys for re-adoption (may add profiles /
+        // show a dialog) — after the suppression scope so any resulting UI
+        // updates register normally.
         adoptOrphansIfAny()
-        currentEditorIndex = if (listModel.isEmpty) -1 else 0
-        if (!listModel.isEmpty) list.selectedIndex = 0 else setFormEnabled(false)
-        loadGlobalFields()
         modified = false
     }
 }

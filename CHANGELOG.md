@@ -4,6 +4,19 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.1] - 2026-10-14
+
+### Fixed
+- Switching provider profiles in the settings no longer leaves the previous provider's fetched model suggestions in the dropdown; the list is cleared on every profile change, add and delete, and stale async model-list replies are dropped when the selection changes mid-fetch (`fix(settings)`)
+- A stale "Test connection" reply can no longer prefill the context-window field (or pop a connection dialog) for a different profile than the one tested (`fix(settings)`)
+- Merely viewing or switching a provider profile no longer marks the settings as modified — Apply/OK is enabled only after real user edits, eliminating spurious unsaved-changes prompts (`fix(settings)`)
+- Picking the "list truncated at 200" entry in the model-suggestions dropdown no longer writes that notice text into the Model field (`fix(settings)`)
+- Editing flushes are tracked by profile id instead of list index, so pending edits can never be written into a different profile when the list shifts during add/delete (`fix(settings)`)
+- Reset in the settings now re-seeds its session state: a key cleared before Reset can no longer wipe the stored PasswordSafe entry on the next Apply, and leftover model suggestions or orphan-candidate state are cleared (`fix(settings)`)
+- Adding a provider now seeds the new profile with the currently selected API protocol and its default base URL instead of always defaulting to OpenAI-compatible (`fix(settings)`)
+- Invalid command-timeout values are clamped to the documented 5–600 s range and invalid context-window values warn on Apply instead of being silently discarded (`fix(settings)`)
+- Merged the duplicate listeners on the web-search-provider dropdown into one suppress-aware listener (`fix(settings)`)
+
 ## [0.7.0] - 2026-10-15
 
 ### Added
