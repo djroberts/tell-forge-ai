@@ -1095,7 +1095,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
         lastAssistantMarkdown = StringBuilder()
         lastReasoning = StringBuilder()
-        client.stream(profile, mode == Mode.PLAN, messages, ToolRegistry.specs(mode == Mode.PLAN)) { event ->
+        client.stream(profile, mode == Mode.PLAN, messages, ToolRegistry.specs(project, mode == Mode.PLAN)) { event ->
             // invoked on a background thread; marshal UI updates to the EDT
             ApplicationManager.getApplication().invokeLater {
                 if (!streaming) return@invokeLater // user pressed Stop; ignore late events

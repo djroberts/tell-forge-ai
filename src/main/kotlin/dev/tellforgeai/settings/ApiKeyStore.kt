@@ -3,6 +3,7 @@ package dev.tellforgeai.settings
 import com.intellij.credentialStore.CredentialAttributes
 import com.intellij.credentialStore.Credentials
 import com.intellij.ide.passwordSafe.PasswordSafe
+import com.intellij.openapi.project.Project
 import dev.tellforgeai.model.ProviderProfile
 
 /**
@@ -18,11 +19,53 @@ object ApiKeyStore {
     /** PasswordSafe key for the optional Brave Search API key (web search). */
     const val BRAVE_KEY_ID: String = "TellForgeAI:brave-api-key"
 
-    /** PasswordSafe key for the per-project Tela wiki personal access token. */
-    const val WIKI_TOKEN_ID: String = "TellForgeAI:tela-wiki-token"
+    /**
+     * Legacy GLOBAL PasswordSafe key for the tela wiki token, used before
+     * wiki tokens became per-project. Kept only for the one-time migration in
+     * [wikiTokenId]; do not read/write it elsewhere.
+     */
+    private const val LEGACY_WIKI_TOKEN_ID: String = "TellForgeAI:tela-wiki-token"
 
     /** Prefix used for every TellForgeAI-scoped PasswordSafe entry. */
     private const val PREFIX = "TellForgeAI:"
+
+    /**
+     * Per-project PasswordSafe key for the tela wiki token. Derived from the
+     * project base path so it is stable across IDE restarts and renames while
+     * never leaking the raw path into the keyring.
+     */
+    fun wikiTokenId(project: Project): String {
+        migrateLegacyWikiToken(project)
+        return "tela-wiki-token:" + scopeId(project)
+    }
+
+    /** Per-project PasswordSafe key for the Notion integration token. */
+    fun notionTokenId(project: Project): String =
+        "notion-token:" + scopeId(project)
+
+    /**
+     * Stable per-project scope suffix for PasswordSafe keys. "default" covers
+     * the default/scratch project where [Project.getBasePath] is null.
+     */
+    private fun scopeId(project: Project): String =
+        project.basePath?.let { Integer.toHexString(it.hashCode()) } ?: "default"
+
+    /**
+     * One-time migration: a wiki token stored under the legacy GLOBAL key
+     * ("TellForgeAI:tela-wiki-token") is moved into the first project that
+     * asks for it, and the global entry is removed so other projects no
+     * longer inherit it silently.
+     */
+    private fun migrateLegacyWikiToken(project: Project) {
+        val legacyAttrs = CredentialAttributes(LEGACY_WIKI_TOKEN_ID)
+        val legacy = PasswordSafe.instance.get(legacyAttrs)
+            ?.getPasswordAsString()?.trim()?.ifBlank { null } ?: return
+        val perProjectAttrs = CredentialAttributes(PREFIX + wikiTokenId(project))
+        if (PasswordSafe.instance.get(perProjectAttrs) == null) {
+            PasswordSafe.instance.set(perProjectAttrs, Credentials("TellForgeAI", legacy))
+        }
+        PasswordSafe.instance.set(legacyAttrs, null)
+    }
 
     private fun attributes(profileId: String) = CredentialAttributes(PREFIX + profileId)
 

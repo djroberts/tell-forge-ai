@@ -3,101 +3,149 @@ package dev.tellforgeai.ui
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.ui.components.JBCheckBox
-import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPasswordField
-import com.intellij.ui.components.JBTextField
+import com.intellij.ui.components.JBTabbedPane
 import com.intellij.util.ui.FormBuilder
 import dev.tellforgeai.settings.ApiKeyStore
+import dev.tellforgeai.settings.NotionState
 import dev.tellforgeai.settings.TellForgeAIWikiState
+import dev.tellforgeai.settings.WikiWriteAction
+import dev.tellforgeai.tools.NotionTool
 import dev.tellforgeai.tools.TelaWikiTool
-import java.awt.BorderLayout
 import javax.swing.JButton
 import javax.swing.JComponent
-import javax.swing.JPanel
-import javax.swing.SwingUtilities
+import javax.swing.JLabel
+import javax.swing.JTextField
 
 /**
- * Per-project tela wiki configuration (Wiki button in the tool window):
- * base URL, personal access token (PasswordSafe, masked) and the one-time
- * write opt-in. "Test connection" verifies the token against
- * {url}/api/auth/me before anything is saved.
+ * Per-project configuration for the wiki/Notion agent tools, opened via the
+ * Wiki button in the tool window. Two tabs:
+ *
+ *  - Tela wiki: enable toggle, instance URL, per-project access token
+ *    (stored in PasswordSafe under a per-project key — dots in the field mean
+ *    a token IS saved for THIS project), connection test, write opt-in with
+ *    per-action "Ask permission" toggles (add / update / delete page).
+ *  - Notion: enable toggle, internal-integration token, connection test,
+ *    write opt-in with the same per-action toggles.
+ *
+ * Unticking an enable toggle removes the wiki_* and notion_* tools from the
+ * model's tool list for this project entirely.
  */
 class ConfigureWikiDialog(private val project: Project) : DialogWrapper(project) {
 
-    private val state = TellForgeAIWikiState.getInstance(project)
+    private val wikiState = TellForgeAIWikiState.getInstance(project)
+    private val notionState = NotionState.getInstance(project)
 
-    private val urlField = JBTextField(state.wikiUrl(), 40)
-    private val tokenField = JBPasswordField().apply {
-        columns = 40
-        toolTipText = "tela personal access token (tela: Settings → API Keys). " +
-            "Stored in the IDE PasswordSafe — never written to settings files. " +
-            "Pre-filled with the stored token; paste a new value to replace it."
-        // Show dots for the already-stored token so the user can see it is saved.
-        text = ApiKeyStore.get(ApiKeyStore.WIKI_TOKEN_ID).orEmpty()
+    // ---- Tela wiki tab
+    private val wikiEnable = JBCheckBox("Enable Tela wiki tools for this project", wikiState.enabled())
+    private val wikiUrlField = JTextField(wikiState.wikiUrl(), 34)
+    private val wikiTokenField = JBPasswordField().apply {
+        // Pre-fill from THIS project's PasswordSafe entry (or empty when none).
+        wikiState.token(project)?.let { text = it }
     }
-    private val writeCheckBox = JBCheckBox(
-        "Allow the agent to create and update wiki pages (Forge mode)",
-        state.writeEnabled(),
+    private val wikiWrite = JBCheckBox(
+        "Allow the agent to create, update and delete wiki pages",
+        wikiState.writeEnabled(),
     )
-    private val testLabel = JBLabel(" ")
+    private val wikiAskCreate = JBCheckBox("Ask permission to add page", !wikiState.skipApproval(WikiWriteAction.CREATE))
+    private val wikiAskUpdate = JBCheckBox("Ask permission to update page", !wikiState.skipApproval(WikiWriteAction.UPDATE))
+    private val wikiAskDelete = JBCheckBox("Ask permission to delete page", !wikiState.skipApproval(WikiWriteAction.DELETE))
+    private val wikiTestLabel = JLabel(" ")
+
+    // ---- Notion tab
+    private val notionEnable = JBCheckBox("Enable Notion tools for this project", notionState.enabled())
+    private val notionTokenField = JBPasswordField().apply {
+        notionState.token(project)?.let { text = it }
+    }
+    private val notionWrite = JBCheckBox(
+        "Allow the agent to create, update and delete Notion pages",
+        notionState.writeEnabled(),
+    )
+    private val notionAskCreate = JBCheckBox("Ask permission to add page", !notionState.skipApproval(WikiWriteAction.CREATE))
+    private val notionAskUpdate = JBCheckBox("Ask permission to update page", !notionState.skipApproval(WikiWriteAction.UPDATE))
+    private val notionAskDelete = JBCheckBox("Ask permission to delete page", !notionState.skipApproval(WikiWriteAction.DELETE))
+    private val notionTestLabel = JLabel(" ")
 
     init {
-        title = "Configure Tela Wiki (this project)"
-        setOKButtonText("Save")
+        title = "Configure Tela Wiki"
         init()
     }
 
     override fun createCenterPanel(): JComponent {
-        val help = JBLabel(
-            "<html><body style='width:380px'>Base URL of your tela instance (e.g. " +
-                "<code>https://telawiki.com</code>). Create a token in tela: <b>Settings → API Keys</b> " +
-                "(scope <b>read</b> for search/read, <b>write</b> to let the agent push pages). " +
-                "The raw <code>tela_pat_…</code> value is shown only once in tela — paste it here. " +
-                "It is stored in the IDE PasswordSafe, not in project files.</body></html>",
-        )
-        val testButton = JButton("Test connection").apply {
-            addActionListener { testConnection() }
-        }
-
-        val form = FormBuilder.createFormBuilder()
-            .addComponent(help)
-            .addLabeledComponent("Wiki URL:", urlField)
-            .addLabeledComponent("Access token:", tokenField)
-            .addComponentToRightColumn(writeCheckBox)
-            .addComponent(testButton)
-            .addComponent(testLabel)
+        val wikiTab = FormBuilder.createFormBuilder()
+            .addComponent(wikiEnable, 4)
+            .addLabeledComponent("Wiki URL:", wikiUrlField)
+            .addLabeledComponent("Access token:", wikiTokenField)
+            .addComponent(wikiTestButton(), 4)
+            .addComponent(wikiTestLabel, 4)
+            .addComponent(wikiWrite, 4)
+            .addComponent(wikiAskCreate, 4)
+            .addComponent(wikiAskUpdate, 4)
+            .addComponent(wikiAskDelete, 4)
             .panel
 
-        return JPanel(BorderLayout()).apply { add(form, BorderLayout.CENTER) }
+        val notionTab = FormBuilder.createFormBuilder()
+            .addComponent(notionEnable, 4)
+            .addLabeledComponent("Integration token:", notionTokenField)
+            .addComponent(notionTestButton(), 4)
+            .addComponent(notionTestLabel, 4)
+            .addComponent(notionWrite, 4)
+            .addComponent(notionAskCreate, 4)
+            .addComponent(notionAskUpdate, 4)
+            .addComponent(notionAskDelete, 4)
+            .panel
+
+        val tabs = JBTabbedPane()
+        tabs.addTab("Tela wiki", wikiTab)
+        tabs.addTab("Notion", notionTab)
+        return tabs
     }
 
-    private fun tokenToUse(): String =
-        String(tokenField.password).trim().ifEmpty {
-            ApiKeyStore.get(ApiKeyStore.WIKI_TOKEN_ID).orEmpty()
+    private fun wikiTestButton() = JButton("Test connection").apply {
+        addActionListener {
+            val token = String(wikiTokenField.password).trim()
+            wikiTestLabel.text = TelaWikiTool.testConnection(wikiUrlField.text.trim(), token)
         }
+    }
 
-    private fun testConnection() {
-        testLabel.text = "Testing…"
-        Thread {
-            // Never leave the label stuck on "Testing…" if anything throws.
-            val result = runCatching {
-                TelaWikiTool.testConnection(urlField.text.trim(), tokenToUse())
-            }.getOrElse { "✗ ${it.message ?: it.javaClass.simpleName}" }
-            // SwingUtilities.invokeLater bypasses IntelliJ's modality queue so the
-            // label update always dispatches even while this modal dialog blocks
-            // NON_MODAL runnables.
-            SwingUtilities.invokeLater { testLabel.text = result }
-        }.apply { isDaemon = true }.start()
+    private fun notionTestButton() = JButton("Test connection").apply {
+        addActionListener {
+            val token = String(notionTokenField.password).trim()
+            notionTestLabel.text = NotionTool.testConnection(token)
+        }
     }
 
     override fun doOKAction() {
-        state.setWikiUrl(urlField.text) // normalized in wikiUrl()
-        val token = String(tokenField.password).trim()
-        if (token.isNotEmpty()) {
-            ApiKeyStore.set(ApiKeyStore.WIKI_TOKEN_ID, token)
+        // ---- Tela wiki
+        wikiState.setEnabled(wikiEnable.isSelected)
+        wikiState.setWikiUrl(wikiUrlField.text)
+        val wikiToken = String(wikiTokenField.password).trim()
+        if (wikiToken.isEmpty()) {
+            // Empty field = clear this project's stored token (dots only appear
+            // when a token was actually saved; a cleared field stays cleared).
+            wikiState.setToken(project, "")
+        } else {
+            wikiState.setToken(project, wikiToken)
         }
         // Writes can only be enabled with a working, saved configuration.
-        state.setWriteEnabled(writeCheckBox.isSelected && state.configured())
+        wikiState.setWriteEnabled(wikiWrite.isSelected && wikiEnable.isSelected && wikiState.configured(project))
+        wikiState.setSkipApproval(WikiWriteAction.CREATE, !wikiAskCreate.isSelected)
+        wikiState.setSkipApproval(WikiWriteAction.UPDATE, !wikiAskUpdate.isSelected)
+        wikiState.setSkipApproval(WikiWriteAction.DELETE, !wikiAskDelete.isSelected)
+
+        // ---- Notion
+        notionState.setEnabled(notionEnable.isSelected)
+        val notionToken = String(notionTokenField.password).trim()
+        if (notionToken.isEmpty()) {
+            notionState.setToken(project, "")
+        } else {
+            notionState.setToken(project, notionToken)
+        }
+        notionState.setWriteEnabled(notionWrite.isSelected && notionEnable.isSelected && notionState.configured(project))
+        notionState.setSkipApproval(WikiWriteAction.CREATE, !notionAskCreate.isSelected)
+        notionState.setSkipApproval(WikiWriteAction.UPDATE, !notionAskUpdate.isSelected)
+        notionState.setSkipApproval(WikiWriteAction.DELETE, !notionAskDelete.isSelected)
+
         super.doOKAction()
     }
 

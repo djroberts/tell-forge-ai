@@ -1,8 +1,8 @@
 package dev.tellforgeai.tools
 
 import com.intellij.openapi.project.Project
-import dev.tellforgeai.settings.ApiKeyStore
 import dev.tellforgeai.settings.TellForgeAIWikiState
+import dev.tellforgeai.settings.WikiWriteAction
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -22,12 +22,13 @@ import java.util.concurrent.TimeUnit
  * The token is stored in PasswordSafe; URL and options are per-project
  * (see [TellForgeAIWikiState]).
  *
- * Exposes three TellForgeAI tools:
- *  - `wiki_search`    — keyword search over pages (both modes, no approval)
- *  - `wiki_read_page` — read one page's markdown body (both modes, no approval)
- *  - `wiki_write_page`— create a page (or update one with the same title in the
- *                       target space). Forge mode only, gated by the project's
- *                       one-time "allow wiki writes" opt-in + per-write approval.
+ * Exposes four TellForgeAI tools:
+ *  - `wiki_search`     — keyword search over pages (both modes, no approval)
+ *  - `wiki_read_page`  — read one page's markdown body (both modes, no approval)
+ *  - `wiki_write_page` — create a page (or replace one with the same title in
+ *                        the target space). Forge mode only, gated by write
+ *                        opt-in + the per-action "Ask permission" checkboxes.
+ *  - `wiki_delete_page`— archive/delete a page. Forge mode only, same gates.
  *
  * API reference: {wikiUrl}/openapi.json. Errors are `{ "error": "...", "code": "..." }`.
  * Scopes: `read` tokens cannot write; writes need `write` scope + editor role
@@ -123,23 +124,15 @@ object TelaWikiTool {
             ?: throw IllegalArgumentException("title required")
         val body = VfsTools.str(args, "content").orEmpty()
 
-        if (!state.configured()) {
+        if (!state.configured(project)) {
             return "Error: no tela wiki is configured for this project. " +
                 "Ask the user to open 'Configure Tela Wiki…' (Wiki button in the tool window), " +
                 "paste an access token and press 'Test connection'."
         }
         if (!state.writeEnabled()) {
             return "Error: wiki writes are not enabled for this project. " +
-                "Ask the user to tick 'Allow the agent to create and update wiki pages' " +
+                "Ask the user to tick 'Allow the agent to create, update and delete wiki pages' " +
                 "in the Configure Tela Wiki dialog."
-        }
-        if (!UiApprovals.ask(
-                project,
-                "TellForgeAI wants to create or update this tela wiki page:\n\n$title\n\nAllow?",
-                "Tela wiki write",
-            )
-        ) {
-            return "Wiki write declined by the user."
         }
 
         // Resolve space: explicit id → explicit name → first space.
@@ -151,6 +144,15 @@ object TelaWikiTool {
 
         // Update when a page with this title already exists in the space, else create.
         val existingId = findPageInSpace(project, spaceId, title)
+        val action = if (existingId != null) WikiWriteAction.UPDATE else WikiWriteAction.CREATE
+        if (action == WikiWriteAction.UPDATE) {
+            // Updating overwrites the whole page body — show it before sending.
+            if (!approveWrite(project, action,
+                    "TellForgeAI wants to REPLACE the body of wiki page '$title' (id $existingId):\n\n" +
+                        body.take(500) + (if (body.length > 500) "\n…" else "") + "\n\nAllow?",
+                )
+            ) return "Wiki update declined by the user."
+        }
         return if (existingId != null) {
             patch(project, "/api/pages/$existingId", buildJsonObject {
                 put("title", title)
@@ -160,6 +162,11 @@ object TelaWikiTool {
                 onFailure = { e -> "Error: wiki_write_page (update) failed — ${describe(e)}" },
             )
         } else {
+            if (!approveWrite(project, WikiWriteAction.CREATE,
+                    "TellForgeAI wants to CREATE this tela wiki page:\n\n$title\n\n" +
+                        body.take(500) + (if (body.length > 500) "\n…" else "") + "\n\nAllow?",
+                )
+            ) return "Wiki page creation declined by the user."
             val payload = buildJsonObject {
                 put("space_id", spaceId.toLong())
                 put("title", title)
@@ -174,6 +181,54 @@ object TelaWikiTool {
                 onFailure = { e -> "Error: wiki_write_page failed — ${describe(e)}" },
             )
         }
+    }
+
+    /**
+     * Per-action approval for mutating wiki tools: when the project's
+     * "Ask permission to … page" checkbox for [action] is unchecked (skip),
+     * writes proceed without a confirmation dialog.
+     */
+    private fun approveWrite(project: Project, action: WikiWriteAction, message: String): Boolean {
+        if (TellForgeAIWikiState.getInstance(project).skipApproval(action)) return true
+        return UiApprovals.ask(project, message, "Tela wiki ${action.name.lowercase()}")
+    }
+
+    /**
+     * Deletes (archives) one wiki page by page id or exact title. Forge mode
+     * only, gated by write opt-in + the "Ask permission to delete page" flag.
+     */
+    fun deletePage(project: Project, args: JsonObject): String {
+        val state = TellForgeAIWikiState.getInstance(project)
+        val identifier = VfsTools.str(args, "page")?.trim()
+            ?: throw IllegalArgumentException("page required (page id or exact title)")
+
+        if (!state.configured(project)) {
+            return "Error: no tela wiki is configured for this project. " +
+                "Ask the user to open 'Configure Tela Wiki…' (Wiki button in the tool window), " +
+                "paste an access token and press 'Test connection'."
+        }
+        if (!state.writeEnabled()) {
+            return "Error: wiki writes are not enabled for this project. " +
+                "Ask the user to tick 'Allow the agent to create, update and delete wiki pages' " +
+                "in the Configure Tela Wiki dialog."
+        }
+
+        val pageId = identifier.toLongOrNull()?.toString()
+            ?: resolveTitleToId(project, identifier)
+            ?: return "Error: no wiki page titled '$identifier'. Use wiki_search to find the exact title."
+
+        // Read the title first so the confirmation names what is deleted.
+        val title = get(project, "/api/pages/$pageId").getOrNull()
+            ?.get("page")?.jsonObject?.get("title")?.jsonPrimitive?.content ?: identifier
+        if (!approveWrite(project, WikiWriteAction.DELETE,
+                "TellForgeAI wants to DELETE wiki page '$title' (id $pageId).\n\nAllow?",
+            )
+        ) return "Wiki delete declined by the user."
+
+        return delete(project, "/api/pages/$pageId").fold(
+            onSuccess = { "Deleted wiki page '$title' (id $pageId)." },
+            onFailure = { e -> "Error: wiki_delete_page failed — ${describe(e)}" },
+        )
     }
 
     private fun parentId(project: Project, spaceId: String, parent: String?): String? {
@@ -278,22 +333,25 @@ object TelaWikiTool {
         return e.message ?: e.javaClass.simpleName
     }
 
-    private fun tokenOrThrow(): String =
-        ApiKeyStore.get(ApiKeyStore.WIKI_TOKEN_ID)
+    private fun tokenOrThrow(project: Project): String =
+        TellForgeAIWikiState.getInstance(project).token(project)
             ?.takeIf { it.isNotBlank() }
-            ?: throw ApiException("unauthorized", "no tela wiki token configured")
+            ?: throw ApiException("unauthorized", "no tela wiki token configured for this project")
 
     private fun baseUrl(project: Project): String =
         TellForgeAIWikiState.getInstance(project).wikiUrl()
 
     private fun get(project: Project, path: String) =
-        requestJson(baseUrl(project) + path, tokenOrThrow(), "GET", null)
+        requestJson(baseUrl(project) + path, tokenOrThrow(project), "GET", null)
 
     private fun post(project: Project, path: String, payload: JsonObject) =
-        requestJson(baseUrl(project) + path, tokenOrThrow(), "POST", payload)
+        requestJson(baseUrl(project) + path, tokenOrThrow(project), "POST", payload)
 
     private fun patch(project: Project, path: String, payload: JsonObject) =
-        requestJson(baseUrl(project) + path, tokenOrThrow(), "PATCH", payload)
+        requestJson(baseUrl(project) + path, tokenOrThrow(project), "PATCH", payload)
+
+    private fun delete(project: Project, path: String) =
+        requestJson(baseUrl(project) + path, tokenOrThrow(project), "DELETE", null)
 
     private fun requestJson(url: String, token: String, method: String, payload: JsonObject?): Result<JsonObject> {
         val builder = Request.Builder()
@@ -306,6 +364,10 @@ object TelaWikiTool {
                     .toRequestBody("application/json".toMediaType()),
             )
             "PATCH" -> builder.patch(
+                (payload ?: JsonObject(emptyMap())).toString()
+                    .toRequestBody("application/json".toMediaType()),
+            )
+            "DELETE" -> builder.delete(
                 (payload ?: JsonObject(emptyMap())).toString()
                     .toRequestBody("application/json".toMediaType()),
             )

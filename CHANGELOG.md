@@ -4,6 +4,26 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.3] - 2026-10-17
+
+### Added
+- Per-action write permissions for Tela wiki and Notion in the Configure Tela Wiki dialog: below the single "Allow the agent to create, update and delete pages" opt-in there are now three checkboxes — **"Ask permission to add page"**, **"Ask permission to update page"** and **"Ask permission to delete page"** — all checked by default, so every mutating tool call pops a confirmation dialog unless the user unticks the matching action (`feat(settings)`)
+- `wiki_delete_page` agent tool: deletes a tela wiki page by page id or exact title (resolves the title first so the confirmation names what is deleted); Forge mode only, gated by the write opt-in and the "Ask permission to delete page" checkbox (`feat(tools)`)
+- Extendable Notion tool set is now wired to the same per-action approval flags: `notion_update_page` / `notion_update_block` follow the update checkbox, `notion_write_page` / `notion_append_blocks` / `notion_create_comment` follow the add checkbox (`feat(tools)`)
+
+### Fixed
+- Write approvals were broken and inconsistent: the Notion tool called a non-existent `skipApproval()` method (compile error), `NotionState` carried eight dead per-action flags that defaulted to silently skipping all confirmation dialogs with no UI to change them, and the Tela wiki "Skip approval" checkbox had inverted semantics vs. Notion's. Both state classes now share one `WikiWriteAction` model (CREATE / UPDATE / DELETE) with "ask by default" as the safe default on first run (`fix(tools)`)
+- `wiki_write_page` previously always confirmed with a generic "create or update" dialog; the create path had no approval at all. Create and update now ask separately, and the update dialog shows a preview of the new body before it overwrites the page (`fix(tools)`)
+
+## [0.7.2] - 2026-10-16
+
+### Fixed
+- Tela wiki tokens are now stored PER PROJECT in PasswordSafe instead of one global keyring entry — previously every project's "Configure Tela Wiki…" dialog showed the same token (dots) and all projects authenticated with it. A one-time migration moves the legacy global token into the first project that reads it and removes the shared entry; other projects start clean and show an empty field until configured (`fix(tools)`)
+
+### Added
+- "Enable Tela wiki tools for this project" toggle in the Configure Tela Wiki dialog: when unticked the `wiki_search` / `wiki_read_page` / `wiki_write_page` tools are not offered to the model at all for that project (and stale in-flight calls are refused with a clear message) (`feat(tools)`)
+- **Notion integration** in the same dialog (new "Notion" tab): per-project internal-integration token (PasswordSafe, per-project key), enable toggle, connection test against `/v1/users/me` and a one-time "allow the agent to create Notion pages" opt-in. Three new agent tools: `notion_search` (POST /v1/search), `notion_read_page` (page + block tree flattened to markdown) and `notion_write_page` (page under an existing parent, Forge mode + per-write approval). Handles Notion's 3 req/s rate limit (429 retry with Retry-After) and 100-block pagination (`feat(tools)`)
+
 ## [0.7.1] - 2026-10-14
 
 ### Fixed

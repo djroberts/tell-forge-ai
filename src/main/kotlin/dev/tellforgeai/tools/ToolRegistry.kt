@@ -14,8 +14,20 @@ import kotlinx.serialization.json.put
  */
 object ToolRegistry {
 
-    /** Tool specs sent to the model. [planMode] restricts the command tool. */
-    fun specs(planMode: Boolean): List<Map<String, Any>> = listOfNotNull(
+    /**
+     * Tool specs sent to the model. [planMode] restricts the command tool.
+     * [project] (nullable for tests) gates the wiki/Notion tools: their specs
+     * are only offered when the corresponding per-project integration is
+     * enabled in the Configure Tela Wiki dialog.
+     */
+    fun specs(project: Project?, planMode: Boolean): List<Map<String, Any>> {
+        val wikiEnabled = project != null &&
+            dev.tellforgeai.settings.TellForgeAIWikiState.getInstance(project).enabled() &&
+            dev.tellforgeai.settings.TellForgeAIWikiState.getInstance(project).configured(project)
+        val notionEnabled = project != null &&
+            dev.tellforgeai.settings.NotionState.getInstance(project).enabled() &&
+            dev.tellforgeai.settings.NotionState.getInstance(project).configured(project)
+        return listOfNotNull(
         spec(
             "list_files",
             "List files and folders under a path relative to the project root. " +
@@ -90,7 +102,7 @@ object ToolRegistry {
             ),
             required = listOf("query"),
         ),
-        spec(
+        if (wikiEnabled) spec(
             "wiki_search",
             "Keyword-search the project's tela wiki (configured via 'Configure Tela Wiki…' " +
                 "in the tool window gear menu). Read-only, both modes, no approval. " +
@@ -99,8 +111,8 @@ object ToolRegistry {
                 "query" to "Search query; short and specific works best.",
             ),
             required = listOf("query"),
-        ),
-        spec(
+        ) else null,
+        if (wikiEnabled) spec(
             "wiki_read_page",
             "Read one page from the project's tela wiki and return its markdown body. " +
                 "Read-only, both modes, no approval.",
@@ -108,14 +120,14 @@ object ToolRegistry {
                 "page" to "Page title, path or id as returned by wiki_search.",
             ),
             required = listOf("page"),
-        ),
-        // Wiki writes exist only in Forge mode and require a one-time per-project opt-in.
-        if (!planMode) spec(
+        ) else null,
+        if (wikiEnabled && !planMode) spec(
             "wiki_write_page",
-            "Create or update a page in the project's tela wiki (markdown body). " +
-                "Forge mode only. Requires the user to have enabled wiki writes in the " +
-                "'Configure Tela Wiki…' dialog, and each write asks for approval. " +
-                "Do not call this repeatedly for the same title — prefer one well-formed page.",
+            "Create a new page in the project's tela wiki, OR replace the body of an existing " +
+                "page with the same title in the target space (confirmation per the user's " +
+                "'Ask permission' settings). Forge mode only. Do not call this repeatedly for " +
+                "the same title — prefer one well-formed page; to extend an existing page tell " +
+                "the user and include the full new body in one call.",
             jsonObjectProps(
                 "title" to "Page title.",
                 "content" to "Page body in markdown.",
@@ -124,7 +136,132 @@ object ToolRegistry {
             ),
             required = listOf("title", "content"),
         ) else null,
-        // File-modification tools exist only in Forge mode and go through the IDE editor.
+        if (wikiEnabled && !planMode) spec(
+            "wiki_delete_page",
+            "Delete one page from the project's tela wiki, by page id or exact title from " +
+                "wiki_search. Forge mode only, gated by the user's write opt-in and " +
+                "'Ask permission to delete page' setting.",
+            jsonObjectProps(
+                "page" to "Page id or exact title.",
+            ),
+            required = listOf("page"),
+        ) else null,
+        // Notion tools, gated by the per-project Notion integration.
+        if (notionEnabled) spec(
+            "notion_search",
+            "Keyword-search the user's Notion workspace for pages the integration can access " +
+                "(configured via the Notion tab of 'Configure Tela Wiki…'). Read-only, both " +
+                "modes, no approval. Returns page ids/titles; use notion_read_page to read one.",
+            jsonObjectProps(
+                "query" to "Search query; short and specific works best. Empty lists all accessible pages.",
+            ),
+            required = listOf("query"),
+        ) else null,
+        if (notionEnabled) spec(
+            "notion_read_page",
+            "Read one Notion page and return its content flattened to markdown-ish text " +
+                "(sub-pages become links, databases are not flattened). Read-only, both modes, " +
+                "no approval. Pass a page id or an exact title from notion_search.",
+            jsonObjectProps(
+                "page" to "Notion page id (UUID) or exact page title.",
+            ),
+            required = listOf("page"),
+        ) else null,
+        if (notionEnabled && !planMode) spec(
+            "notion_write_page",
+            "Create a new Notion page under an existing parent page (markdown body flattened " +
+                "to Notion paragraph/heading/list/code blocks). Forge mode only. Requires the " +
+                "user to have enabled Notion writes in the 'Configure Tela Wiki…' dialog, and " +
+                "each write asks for approval. Do not call this repeatedly for the same title.",
+            jsonObjectProps(
+                "title" to "New page title.",
+                "content" to "Page body in markdown (headings, bullets, code fences; 100 blocks max).",
+                "parent" to "Parent page id or exact title. Notion requires a parent page.",
+            ),
+            required = listOf("title", "content", "parent"),
+        ) else null,
+        if (notionEnabled && !planMode) spec(
+            "notion_append_blocks",
+            "Append markdown content to an EXISTING Notion page (or block) instead of creating a " +
+                "duplicate page — PREFER THIS over notion_write_page when the page already exists. " +
+                "Forge mode only, requires Notion writes enabled, asks for approval per call.",
+            jsonObjectProps(
+                "page" to "Existing page (or block) id or exact page title.",
+                "content" to "Markdown to append (headings, bullets, code fences; 100 blocks max).",
+            ),
+            required = listOf("page", "content"),
+        ) else null,
+        if (notionEnabled && !planMode) spec(
+            "notion_update_page",
+            "Update a Notion page's properties: rename (title), move (parent) and/or archive. " +
+                "Forge mode only, requires Notion writes enabled, asks for approval per call.",
+            jsonObjectProps(
+                "page" to "Page id or exact title.",
+                "title" to "Optional new title.",
+                "parent" to "Optional new parent page id or title (move).",
+                "archive" to "Optional 'true' to archive (move to trash; Notion has no hard delete).",
+            ),
+            required = listOf("page"),
+        ) else null,
+        if (notionEnabled && !planMode) spec(
+            "notion_delete_page",
+            "Archive (soft-delete) a Notion page — Notion's API has no hard delete; archived " +
+                "pages are recoverable from Notion's trash. Forge mode only, asks for approval.",
+            jsonObjectProps(
+                "page" to "Page id or exact title to archive.",
+            ),
+            required = listOf("page"),
+        ) else null,
+        if (notionEnabled && !planMode) spec(
+            "notion_update_block",
+            "Replace the text of one editable Notion block (paragraph, heading 1-3, list item, " +
+                "quote, toggle, callout) in place, or archive it. The agent can fix a page " +
+                "without rewriting it. Forge mode only, asks for approval.",
+            jsonObjectProps(
+                "blockId" to "Block id from notion_read_page (call it with include_block_ids=true; " +
+                    "ids appear as (block_id: …)).",
+                "content" to "New text for the block (leading '# '/'- ' hints the block type).",
+                "blockType" to "Optional explicit block type (paragraph, heading_1, …).",
+                "archive" to "Optional 'true' to archive the block (remove it).",
+            ),
+            required = listOf("blockId", "content"),
+        ) else null,
+        if (notionEnabled && !planMode) spec(
+            "notion_upload_file",
+            "Upload a project file to Notion via the File Upload API (single part, ≤ 20 MB) and " +
+                "optionally attach it to a page as an image/file block. Forge mode only, asks " +
+                "for approval (shows the path). Uploads expire after 1 hour if not attached.",
+            jsonObjectProps(
+                "path" to "Project-relative file path to upload.",
+                "page" to "Optional page id or title to attach the file to.",
+                "caption" to "Optional caption for the attached block.",
+            ),
+            required = listOf("path"),
+        ) else null,
+        if (notionEnabled && !planMode) spec(
+            "notion_create_comment",
+            "Comment on a Notion page or discussion. Needs the 'insert comments' capability on " +
+                "the integration token. Forge mode only, asks for approval.",
+            jsonObjectProps(
+                "content" to "Comment text.",
+                "page" to "Page id or title (required unless discussionId is given).",
+                "discussionId" to "Optional existing discussion/thread id to reply in.",
+            ),
+            required = listOf("content"),
+        ) else null,
+        if (notionEnabled) spec(
+            "notion_query_database",
+            "Query a Notion database and list its rows (the reader cannot flatten databases). " +
+                "Read-only, both modes, no approval. Optional filter/sorts are raw JSON " +
+                "(https://developers.notion.com/reference/post-database-query-filter).",
+            jsonObjectProps(
+                "database" to "Database id, or id/title from notion_search results marked [database].",
+                "filter" to "Optional Notion filter JSON object, e.g. {\"property\":\"Status\",\"select\":{\"equals\":\"Done\"}}.",
+                "sorts" to "Optional Notion sorts JSON array, e.g. [{\"property\":\"Name\",\"direction\":\"ascending\"}].",
+                "limit" to "Optional max rows (1-100, default 20).",
+            ),
+            required = listOf("database"),
+        ) else null,
         if (!planMode) spec(
             "download_binary",
             "Download a binary file from an HTTPS URL into the project. This tool is available " +
@@ -160,7 +297,8 @@ object ToolRegistry {
             ),
             required = listOf("path", "oldString", "newString"),
         ) else null,
-    )
+        )
+    }
 
     private fun spec(
         name: String,
@@ -208,10 +346,61 @@ object ToolRegistry {
             "read_file" -> VfsTools.readFile(project, args)
             "search_files" -> VfsTools.searchFiles(project, args)
             "web_search" -> WebSearchTool.search(args)
-            "wiki_search" -> TelaWikiTool.search(project, args)
-            "wiki_read_page" -> TelaWikiTool.readPage(project, args)
-            "wiki_write_page" -> if (planMode) notAllowedInPlan(name)
-                else TelaWikiTool.writePage(project, args)
+            "wiki_search" -> if (!wikiAllowed(project)) notEnabled("wiki_search")
+                else TelaWikiTool.search(project, args)
+            "wiki_read_page" -> if (!wikiAllowed(project)) notEnabled("wiki_read_page")
+                else TelaWikiTool.readPage(project, args)
+            "wiki_write_page" -> when {
+                planMode -> notAllowedInPlan(name)
+                !wikiAllowed(project) -> notEnabled(name)
+                else -> TelaWikiTool.writePage(project, args)
+            }
+            "wiki_delete_page" -> when {
+                planMode -> notAllowedInPlan(name)
+                !wikiAllowed(project) -> notEnabled(name)
+                else -> TelaWikiTool.deletePage(project, args)
+            }
+            "notion_search" -> if (!notionAllowed(project)) notEnabled("notion_search")
+                else NotionTool.search(project, args)
+            "notion_read_page" -> if (!notionAllowed(project)) notEnabled("notion_read_page")
+                else NotionTool.readPage(project, args)
+            "notion_write_page" -> when {
+                planMode -> notAllowedInPlan(name)
+                !notionAllowed(project) -> notEnabled(name)
+                else -> NotionTool.writePage(project, args)
+            }
+            "notion_append_blocks" -> when {
+                planMode -> notAllowedInPlan(name)
+                !notionAllowed(project) -> notEnabled(name)
+                else -> NotionTool.appendBlocks(project, args)
+            }
+            "notion_update_page" -> when {
+                planMode -> notAllowedInPlan(name)
+                !notionAllowed(project) -> notEnabled(name)
+                else -> NotionTool.updatePage(project, args)
+            }
+            "notion_delete_page" -> when {
+                planMode -> notAllowedInPlan(name)
+                !notionAllowed(project) -> notEnabled(name)
+                else -> NotionTool.deletePage(project, args)
+            }
+            "notion_update_block" -> when {
+                planMode -> notAllowedInPlan(name)
+                !notionAllowed(project) -> notEnabled(name)
+                else -> NotionTool.updateBlock(project, args)
+            }
+            "notion_upload_file" -> when {
+                planMode -> notAllowedInPlan(name)
+                !notionAllowed(project) -> notEnabled(name)
+                else -> NotionTool.uploadFile(project, args)
+            }
+            "notion_create_comment" -> when {
+                planMode -> notAllowedInPlan(name)
+                !notionAllowed(project) -> notEnabled(name)
+                else -> NotionTool.createComment(project, args)
+            }
+            "notion_query_database" -> if (!notionAllowed(project)) notEnabled("notion_query_database")
+                else NotionTool.queryDatabase(project, args)
             "run_command" -> CommandTool.run(project, args, planMode, onCommandRequested)
             "download_binary" -> if (planMode) notAllowedInPlan(name)
                 else DownloadBinaryTool.download(project, args, onDownloadRequested ?: { false })
@@ -225,4 +414,20 @@ object ToolRegistry {
 
     private fun notAllowedInPlan(name: String): String =
         "Error: '$name' is not available in Foretell mode. Switch to Forge mode to modify files."
+
+    /** Stale-spec guard: the wiki tools must be enabled AND configured for this project. */
+    private fun wikiAllowed(project: Project): Boolean {
+        val s = dev.tellforgeai.settings.TellForgeAIWikiState.getInstance(project)
+        return s.enabled() && s.configured(project)
+    }
+
+    /** Stale-spec guard: the Notion tools must be enabled AND configured for this project. */
+    private fun notionAllowed(project: Project): Boolean {
+        val s = dev.tellforgeai.settings.NotionState.getInstance(project)
+        return s.enabled() && s.configured(project)
+    }
+
+    private fun notEnabled(name: String): String =
+        "Error: '$name' is disabled for this project. The user can enable it in the " +
+            "'Configure Tela Wiki…' dialog (Wiki button in the tool window)."
 }
