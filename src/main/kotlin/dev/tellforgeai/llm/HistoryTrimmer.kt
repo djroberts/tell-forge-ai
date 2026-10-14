@@ -147,9 +147,14 @@ object HistoryTrimmer {
 fun ChatMessage.estimatedTokens(): Int {
     var t = content.length / 4 + 4
     for (c in toolCalls) t += c.arguments.length / 4 + c.name.length / 4 + 8
-    // Vision: a small (256px) pasted image costs roughly 256–1,100 tokens
-    // depending on the provider; 1,300 is a safe upper bound.
-    t += images.size * 1_300
+    // Vision cost scales with image payload: base64 bytes ≈ 4/3 of raw PNG
+    // bytes; providers tile images (~750 tokens per 512–1024 px tile on OpenAI).
+    // ~750 tokens per 300 KB of encoded payload is a conservative heuristic —
+    // small pastes floor at the old 1,300-token estimate.
+    for (img in images) {
+        val bytes = img.length // data-URL chars ≈ base64 bytes
+        t += maxOf(1_300, bytes / 400)
+    }
     return t
 }
 

@@ -90,6 +90,40 @@ object ToolRegistry {
             ),
             required = listOf("query"),
         ),
+        spec(
+            "wiki_search",
+            "Keyword-search the project's tela wiki (configured via 'Configure Tela Wiki…' " +
+                "in the tool window gear menu). Read-only, both modes, no approval. " +
+                "If no wiki is configured the call fails — do not retry; say so and move on.",
+            jsonObjectProps(
+                "query" to "Search query; short and specific works best.",
+            ),
+            required = listOf("query"),
+        ),
+        spec(
+            "wiki_read_page",
+            "Read one page from the project's tela wiki and return its markdown body. " +
+                "Read-only, both modes, no approval.",
+            jsonObjectProps(
+                "page" to "Page title, path or id as returned by wiki_search.",
+            ),
+            required = listOf("page"),
+        ),
+        // Wiki writes exist only in Forge mode and require a one-time per-project opt-in.
+        if (!planMode) spec(
+            "wiki_write_page",
+            "Create or update a page in the project's tela wiki (markdown body). " +
+                "Forge mode only. Requires the user to have enabled wiki writes in the " +
+                "'Configure Tela Wiki…' dialog, and each write asks for approval. " +
+                "Do not call this repeatedly for the same title — prefer one well-formed page.",
+            jsonObjectProps(
+                "title" to "Page title.",
+                "content" to "Page body in markdown.",
+                "space" to "Optional space key; omit to use the default.",
+                "parent" to "Optional parent page title/path.",
+            ),
+            required = listOf("title", "content"),
+        ) else null,
         // File-modification tools exist only in Forge mode and go through the IDE editor.
         if (!planMode) spec(
             "download_binary",
@@ -174,6 +208,10 @@ object ToolRegistry {
             "read_file" -> VfsTools.readFile(project, args)
             "search_files" -> VfsTools.searchFiles(project, args)
             "web_search" -> WebSearchTool.search(args)
+            "wiki_search" -> TelaWikiTool.search(project, args)
+            "wiki_read_page" -> TelaWikiTool.readPage(project, args)
+            "wiki_write_page" -> if (planMode) notAllowedInPlan(name)
+                else TelaWikiTool.writePage(project, args)
             "run_command" -> CommandTool.run(project, args, planMode, onCommandRequested)
             "download_binary" -> if (planMode) notAllowedInPlan(name)
                 else DownloadBinaryTool.download(project, args, onDownloadRequested ?: { false })

@@ -17,6 +17,9 @@ object ApiKeyStore {
     /** PasswordSafe key for the optional Brave Search API key (web search). */
     const val BRAVE_KEY_ID: String = "TellForgeAI:brave-api-key"
 
+    /** PasswordSafe key for the per-project Tela wiki personal access token. */
+    const val WIKI_TOKEN_ID: String = "TellForgeAI:tela-wiki-token"
+
     /** Prefix used for every TellForgeAI-scoped PasswordSafe entry. */
     private const val PREFIX = "TellForgeAI:"
 

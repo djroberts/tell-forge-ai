@@ -261,9 +261,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var hoveredChatIndex = -1
 
     // --- Image paste ---
-    /** Max dimension (px) of the longest side for pasted images — kept small so
-     *  persisted chats stay compact and vision tokens stay cheap. */
-    private val imageMaxSize = 256
+    /** Max dimension (px) of the longest side for pasted images; from settings
+     *  (0 = send at original resolution). File-referenced (@path) images are
+     *  always sent at original resolution regardless of this. */
+    private val imageMaxSize: Int get() = TellForgeAISettings.getInstance().pastedImageMaxSize()
     /** Base64 PNG data URLs of images pasted into the input, not yet sent. */
     private val pendingImages = mutableListOf<String>()
     /** SHA-256 hashes of the downscaled PNGs in [pendingImages] — used to ignore duplicates. */
@@ -321,6 +322,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             ShowSettingsUtil.getInstance()
                 .showSettingsDialog(project, TellForgeAIConfigurable::class.java) { refreshProfiles() }
         }
+        val wikiButton = JButton("Wiki").apply { toolTipText = "Configure Tela Wiki for this project" }
+        wikiButton.addActionListener {
+            dev.tellforgeai.ui.ConfigureWikiDialog.show(project)
+        }
         testButton.toolTipText = "Test the selected provider connection (/models)"
         testButton.addActionListener { onTestConnection() }
         refreshPricingButton.addActionListener { onRefreshPricing() }
@@ -332,7 +337,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             add(profileCombo, BorderLayout.CENTER)
             val right = JPanel().apply {
                 isOpaque = false
-                add(newChatButton); add(testButton); add(settingsButton)
+                add(newChatButton); add(testButton); add(wikiButton); add(settingsButton)
             }
             add(right, BorderLayout.EAST)
         }
@@ -651,11 +656,16 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 "user" -> finishedBlocks.add(
                     bubble(
                         "You",
-                        m.images.takeIf { it.isNotEmpty() }?.let { imgs ->
-                            "<div style='margin:4px 0'>" + imgs.joinToString("") {
-                                "<img src='$it' width='128' height='128' style='margin:2px'/>"
+                        m.referencedPaths.takeIf { it.isNotEmpty() }?.let { paths ->
+                            "<div style='margin:4px 0;color:#666;font-size:11px'>" + paths.joinToString(" &nbsp;") {
+                                "🖼 " + esc(it)
                             } + "</div>"
-                        }.orEmpty() + esc(m.content).replace("\n", "<br/>"),
+                        }.orEmpty() +
+                            m.images.takeIf { it.isNotEmpty() }?.let { imgs ->
+                                "<div style='margin:4px 0'>" + imgs.take(4).joinToString("") {
+                                    "<img src='$it' width='128' height='128' style='margin:2px'/>"
+                                } + (if (imgs.size > 4) "<div style='color:#666;font-size:11px'>… ${imgs.size} images</div>" else "") + "</div>"
+                            }.orEmpty() + esc(m.content).replace("\n", "<br/>"),
                         userBubbleBg,
                     )
                 )
@@ -968,8 +978,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             return
         }
         val images = pendingImages.toList()
-        val text = inputArea.text.trim()
-        if ((text.isEmpty() && images.isEmpty()) || streaming) return
+        val rawText = inputArea.text.trim()
+        // @path tokens in the message body load full-resolution images from disk.
+        val (text, referencedImages, referencedPaths) = extractImageReferences(rawText)
+        if ((text.isEmpty() && images.isEmpty() && referencedImages.isEmpty()) || streaming) return
         pendingImages.clear()
         pendingImageHashes.clear()
         refreshImageStrip()
@@ -982,11 +994,14 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             TellForgeAIChatsState.getInstance(project).upsert(chat)
         }
 
-        history += ChatMessage.user(text).apply { this.images = images }
+        history += ChatMessage.user(text).apply {
+            this.images = images + referencedImages
+            this.referencedPaths = referencedPaths
+        }
         compactionFailedForCurrentTurn = false
         toolRounds = 0
         persistChat()
-        appendUser(text, images)
+        appendUser(text, images + referencedImages, referencedPaths)
         setStreaming(true)
         updateStickyHeader()
 
@@ -1397,14 +1412,20 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     // --- transcript rendering ---
 
-    private fun appendUser(text: String, images: List<String> = emptyList()) {
+    private fun appendUser(text: String, images: List<String> = emptyList(), referencedPaths: List<String> = emptyList()) {
         val imgsHtml = if (images.isEmpty()) "" else
             "<div style='margin:4px 0'>" + images.joinToString("") {
                 "<img src='$it' width='128' height='128' style='margin:2px'/>"
             } + "</div>"
+        // Referenced (@path) images: chips with the file path instead of
+        // re-decoding huge base64 payloads into the transcript HTML.
+        val refsHtml = if (referencedPaths.isEmpty()) "" else
+            "<div style='margin:4px 0;color:#666;font-size:11px'>" + referencedPaths.joinToString(" &nbsp;") {
+                "🖼 " + esc(it)
+            } + "</div>"
         finishedBlocks.add(bubble(
             "You",
-            imgsHtml + esc(text).replace("\n", "<br/>"),
+            refsHtml + imgsHtml + esc(text).replace("\n", "<br/>"),
             userBubbleBg,
         ))
         streamingHeader = ""
@@ -1907,10 +1928,98 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     }
 
+    // --- @path image references ---
+
+    /** Image file extensions accepted for @path references. */
+    private val imageExtensions = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
+
+    /** Guard rails for file-referenced images (protect providers, don't degrade). */
+    private val refImageMaxBytes = 20L * 1024 * 1024
+    private val refImageMaxPixels = 8192
+
+    /** MIME type for an image file extension (defaults to png for unknown). */
+    private fun imageMime(ext: String): String = when (ext.lowercase()) {
+        "jpg", "jpeg" -> "image/jpeg"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "bmp" -> "image/bmp"
+        else -> "image/png"
+    }
+
+    /**
+     * Scans [text] for `@path` tokens (path may also be wrapped in quotes for
+     * spaces, e.g. `@"my folder/shot.png"`), resolves each against the project
+     * root (absolute paths allowed), and loads image files as full-resolution
+     * data URLs. Returns the text with the consumed tokens removed plus the
+     * loaded data URLs; unreadable/rejected files are reported inline.
+     */
+    private fun extractImageReferences(text: String): Triple<String, List<String>, List<String>> {
+        val images = mutableListOf<String>()
+        val paths = mutableListOf<String>()
+        val cleaned = StringBuilder()
+        // @"quoted path with spaces" OR @unquoted-token
+        val regex = Regex("@\"([^\"]+)\"|@(\\S+)")
+        var last = 0
+        for (m in regex.findAll(text)) {
+            cleaned.append(text, last, m.range.first)
+            last = m.range.last + 1
+            val raw = m.groupValues[1].ifBlank { m.groupValues[2] }
+            val ext = raw.substringAfterLast('.', "").lowercase()
+            if (ext !in imageExtensions) {
+                // Not an image path — leave the token untouched (e.g. an email
+                // address or a code identifier starting with @).
+                cleaned.append(m.value)
+                continue
+            }
+            loadImageReference(raw)?.let {
+                images += it
+                paths += raw
+            } ?: appendSystem("⚠ Could not read image: $raw")
+        }
+        cleaned.append(text, last, text.length)
+        return Triple(cleaned.toString().trim(), images, paths)
+    }
+
+    /**
+     * Resolves [raw] against the project root (absolute paths pass through),
+     * validates guard rails and encodes the file as a base64 data URL at
+     * ORIGINAL resolution — file references exist to preserve detail.
+     */
+    private fun loadImageReference(raw: String): String? {
+        val file = java.io.File(raw)
+        val resolved = if (file.isAbsolute) file else {
+            val root = project.basePath ?: return null
+            java.io.File(root, raw)
+        }.canonicalFile
+        if (!resolved.isFile) return null
+        if (resolved.length() > refImageMaxBytes) {
+            appendSystem("⚠ Image too large (${resolved.length() / 1024 / 1024} MB, max 20 MB): ${resolved.name}")
+            return null
+        }
+        val bytes = try { resolved.readBytes() } catch (_: Exception) { return null }
+        val dims = imageFromBytes(bytes)?.let { ensureLoaded(it) } ?: return null
+        val w = dims.getWidth(null)
+        val h = dims.getHeight(null)
+        if (w > refImageMaxPixels || h > refImageMaxPixels) {
+            appendSystem("⚠ Image too large (${w}×${h}px, max $refImageMaxPixels): ${resolved.name}")
+            return null
+        }
+        return "data:${imageMime(resolved.extension)};base64," +
+            Base64.getEncoder().encodeToString(bytes)
+    }
+
     /** Downscales, encodes and queues a pasted image; shows it in the strip. */
     private fun addPendingImage(image: Image) {
         val dataUrl = try {
-            val size = scaledSize(image, imageMaxSize)
+            // imageMaxSize == 0 → "Original" setting: keep native resolution.
+            val max = imageMaxSize
+            val size = if (max <= 0) {
+                val loaded = ensureLoaded(image)
+                Dimension(
+                    loaded.getWidth(null).coerceAtLeast(1),
+                    loaded.getHeight(null).coerceAtLeast(1),
+                )
+            } else scaledSize(image, max)
             // Draw synchronously with bilinear interpolation (getScaledInstance is
             // async and can produce a blank result if drawn before it loads).
             val buf = BufferedImage(size.width, size.height, BufferedImage.TYPE_INT_ARGB)

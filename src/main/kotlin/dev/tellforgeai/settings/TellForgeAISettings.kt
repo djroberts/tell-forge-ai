@@ -32,6 +32,11 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
         var webSearchProvider: String = "duckduckgo"
         /** Explicit opt-in: use the selected LLM for a billable model-pricing lookup. */
         var aiPricingLookupEnabled: Boolean = false
+        /**
+         * Max longest-side size (px) for images pasted into the chat input before
+         * they are sent to the model. 0 = send at original resolution.
+         */
+        var pastedImageMaxSize: Int = 1024
         /** Provider/model keyed pricing and context lookup cache; entries expire after one day. */
         var modelInfoCache: MutableList<ModelInfoCacheEntry> = mutableListOf()
         /**
@@ -104,6 +109,19 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
 
     fun setAiPricingLookupEnabled(value: Boolean) {
         state.aiPricingLookupEnabled = value
+    }
+
+    /** 0 = original resolution; anything else is coerced into the sane range. */
+    fun pastedImageMaxSize(): Int {
+        val v = state.pastedImageMaxSize
+        return when {
+            v <= 0 -> 0
+            else -> v.coerceIn(256, 8192)
+        }
+    }
+
+    fun setPastedImageMaxSize(value: Int) {
+        state.pastedImageMaxSize = value
     }
 
     fun modelInfoCache(key: String): ModelInfoCacheEntry? =

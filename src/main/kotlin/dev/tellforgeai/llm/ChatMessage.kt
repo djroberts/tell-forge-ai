@@ -27,6 +27,10 @@ data class ChatMessage(
     var toolCallId: String = "",
     /** Base64 PNG data URLs of images pasted with this message (user messages only). */
     var images: List<String> = emptyList(),
+    /** Project-relative (or absolute) paths of images the user referenced via
+     *  @path tokens. The full-resolution payloads live in [images]; this list
+     *  only records *which files* were referenced, for display and history. */
+    var referencedPaths: List<String> = emptyList(),
 ) {
     companion object {
         fun system(content: String) = ChatMessage("system", content)

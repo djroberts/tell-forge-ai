@@ -4,6 +4,18 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] - 2026-10-14
+
+### Added
+- Tela wiki integration: three new agent tools (`wiki_search`, `wiki_read_page`, `wiki_write_page`) that let the model search, read and create/update pages on any tela wiki instance, authenticated with a personal access token stored in the IDE PasswordSafe (`feat(tools)`)
+- Per-project Tela wiki configuration dialog (Wiki button in the tool window gear menu) with base URL, masked token field, a one-time write-opt-in checkbox and a "Test connection" button that verifies the token before anything is saved (`feat(ui)`)
+- `TellForgeAIWikiState` persistent service that roams the wiki URL and endpoint path with the project (`feat(settings)`)
+- Global "Max pasted image size" setting (256 / 512 / 1024 / 2048 / Original) in the providers configurable, letting users cap the longest side of pasted images before they are sent to the model (`feat(settings)`)
+- `@path` token support: `referencedPaths` field on `ChatMessage` records which files were referenced via `@path` for display and history (`feat(chat)`)
+
+### Changed
+- Image token estimation in `HistoryTrimmer` is now size-aware — it scales with base64 payload length instead of a flat 1,300 tokens per image, reducing waste for small pasted screenshots (`perf(chat)`)
+
 ## [0.5.3] - 2026-10-13
 
 ### Fixed

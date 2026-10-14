@@ -32,6 +32,8 @@ class TellForgeAIConfigurable : Configurable {
     private val contextWindowField = JBTextField()
     private val timeoutField = JBTextField()
     private val webSearchProviderCombo = JComboBox(arrayOf("duckduckgo", "brave"))
+    /** Longest-side cap for pasted images: 256/512/1024/2048/Original. */
+    private val pastedImageSizeCombo = JComboBox(arrayOf("256", "512", "1024", "2048", "Original"))
     private val braveKeyField = JPasswordField()
     private val aiPricingLookupCheckBox = JCheckBox("Use the selected LLM for a billable pricing lookup (cached for 24 hours)")
     /** API protocol selector (OpenAI-compatible / OpenAI Responses / Gemini preset). */
@@ -103,6 +105,7 @@ class TellForgeAIConfigurable : Configurable {
         )
         braveKeyField.document.addDocumentListener(SimpleDocListener { modified = true })
         webSearchProviderCombo.addActionListener { modified = true }
+        pastedImageSizeCombo.addActionListener { modified = true }
         webSearchProviderCombo.addActionListener {
             braveKeyField.isEnabled = webSearchProviderCombo.selectedItem == "brave"
         }
@@ -212,6 +215,7 @@ class TellForgeAIConfigurable : Configurable {
         center.add(labeled("Web search provider (duckduckgo = keyless; brave = requires API key; global)", webSearchProviderCombo))
         center.add(labeled("Brave Search API key (only used when provider is brave; stored in PasswordSafe; global)", braveKeyField))
         center.add(aiPricingLookupCheckBox)
+        center.add(labeled("Max pasted image size in px (longest side; Original = no resize; global)", pastedImageSizeCombo))
         aiPricingLookupCheckBox.addActionListener { modified = true }
         root.add(center, BorderLayout.CENTER)
         loadGlobalFields()
@@ -228,6 +232,8 @@ class TellForgeAIConfigurable : Configurable {
         braveKeyField.text = ApiKeyStore.get(ApiKeyStore.BRAVE_KEY_ID).orEmpty()
         braveKeyField.isEnabled = provider == "brave"
         aiPricingLookupCheckBox.isSelected = s.aiPricingLookupEnabled()
+        pastedImageSizeCombo.selectedItem =
+            s.pastedImageMaxSize().takeIf { it > 0 }?.toString() ?: "Original"
     }
 
     private fun setFormEnabled(enabled: Boolean) {
@@ -441,6 +447,12 @@ class TellForgeAIConfigurable : Configurable {
             (webSearchProviderCombo.selectedItem as? String) ?: "duckduckgo"
         )
         settings.setAiPricingLookupEnabled(aiPricingLookupCheckBox.isSelected)
+        settings.setPastedImageMaxSize(
+            when (val sel = pastedImageSizeCombo.selectedItem as? String) {
+                "Original" -> 0
+                else -> sel?.toIntOrNull() ?: 1024
+            },
+        )
         ApiKeyStore.set(ApiKeyStore.BRAVE_KEY_ID, String(braveKeyField.password).trim())
         val ids = listModel.elements().toList().map { it.id }.toSet()
         // Remove PasswordSafe entries for profiles deleted through this settings
