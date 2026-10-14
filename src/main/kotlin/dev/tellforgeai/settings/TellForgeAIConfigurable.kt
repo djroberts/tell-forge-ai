@@ -51,6 +51,10 @@ class TellForgeAIConfigurable : Configurable {
     private val list = JBList(listModel)
     private val testButton = JButton("Test connection")
     private val testClient = dev.tellforgeai.llm.LlmClient()
+
+    /** OpenRouter-specific form fields, shown/hidden based on the selected protocol. */
+    private val openRouterForm = OpenRouterForm { modified = true }
+
     private lateinit var formFields: List<JComponent>
 
     private var modified = false
@@ -109,13 +113,13 @@ class TellForgeAIConfigurable : Configurable {
         webSearchProviderCombo.addActionListener {
             braveKeyField.isEnabled = webSearchProviderCombo.selectedItem == "brave"
         }
-        // API protocol: switching swaps the base-url default (and later, protocol-
-        // specific option rows) but never discards the user's URL until they edit.
+        // API protocol: switching swaps the base-url default and toggles the
+        // OpenRouter-specific options panel but never discards the user's URL.
         protocolCombo.addActionListener {
             modified = true
-            urlField.emptyText.text =
-                ApiProtocol.entries.firstOrNull { it.displayName == protocolCombo.selectedItem }
-                    ?.defaultBaseUrl.orEmpty()
+            val proto = ApiProtocol.entries.firstOrNull { it.displayName == protocolCombo.selectedItem }
+            urlField.emptyText.text = proto?.defaultBaseUrl.orEmpty()
+            openRouterForm.root.isVisible = proto == ApiProtocol.OPENROUTER
         }
         fetchModelsButton.addActionListener { onFetchModels() }
         modelCombo.isEditable = false
@@ -201,6 +205,9 @@ class TellForgeAIConfigurable : Configurable {
         form.add(labeled("Model for Foretell mode (optional, blank = same)", planModelField))
         form.add(labeled("Reasoning effort (optional, e.g. low/medium/high; sent as reasoning_effort)", reasoningEffortField))
         form.add(labeled("Context window (tokens; auto-detected on Test connection, manual override)", contextWindowField))
+        // OpenRouter-specific options (hidden for other protocols)
+        form.add(openRouterForm.root)
+        openRouterForm.root.isVisible = false
         form.add(Box.createVerticalGlue())
         formFields = listOf(nameField, urlField, keyField, modelField, planModelField, reasoningEffortField, testButton, protocolCombo, fetchModelsButton, modelCombo)
 
@@ -295,6 +302,8 @@ class TellForgeAIConfigurable : Configurable {
         planModelField.text = p.planModel.orEmpty()
         reasoningEffortField.text = p.reasoningEffort.orEmpty()
         contextWindowField.text = p.contextWindow.toString()
+        openRouterForm.load(p)
+        openRouterForm.root.isVisible = p.isOpenRouter
     }
 
     private fun onAdd() {
@@ -422,16 +431,19 @@ class TellForgeAIConfigurable : Configurable {
      */
     private fun flushEditsInto(idx: Int) {
         val old = listModel[idx]
-        listModel[idx] = old.copy(
+        val updated = old.copy(
             name = nameField.text.trim(),
             apiProtocol = ApiProtocol.fromDisplayName(protocolCombo.selectedItem?.toString()),
             baseUrl = urlField.text.trim().removeSuffix("/"),
-            apiKey = String(keyField.password),
+            apiKey = String(keyField.password).trim(),
             model = modelField.text.trim(),
             planModel = planModelField.text.trim().ifBlank { null },
             reasoningEffort = reasoningEffortField.text.trim().ifBlank { null },
             contextWindow = contextWindowField.text.trim().toIntOrNull()?.coerceAtLeast(1024) ?: 128_000,
         )
+        // Save OpenRouter-specific fields if the protocol is OpenRouter
+        openRouterForm.saveInto(updated)
+        listModel[idx] = updated
     }
 
     override fun isModified(): Boolean {

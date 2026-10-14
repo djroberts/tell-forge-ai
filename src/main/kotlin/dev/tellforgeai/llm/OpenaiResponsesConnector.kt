@@ -66,7 +66,7 @@ class OpenaiResponsesConnector : LlmConnector {
     ) {
         if (isRunning()) return
         val model = profile.modelFor(planMode)
-        val apiKey = ApiKeyStore.get(profile.id).orEmpty()
+        val apiKey = ApiKeyStore.resolve(profile)
         val url = profile.trimmedBaseUrl() + "/responses"
 
         val body = buildJsonObject {
@@ -89,6 +89,10 @@ class OpenaiResponsesConnector : LlmConnector {
             .build()
 
         currentJob = scope.launch {
+            if (apiKey.isBlank()) {
+                onEvent(LlmClient.Event.Error("No API key configured. Open the Settings dialog (gear icon), paste your API key, and click Apply."))
+                return@launch
+            }
             val sb = StringBuilder()
             // Accumulates function-call arguments keyed by item_id — they arrive
             // piecemeal via response.function_call_arguments.delta events.

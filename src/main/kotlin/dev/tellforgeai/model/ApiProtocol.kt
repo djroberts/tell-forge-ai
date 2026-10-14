@@ -18,7 +18,7 @@ enum class ApiProtocol(
 ) {
     /**
      * Classic chat/completions wire format. Covers OpenAI (via /v1),
-     * OpenRouter, Ollama, LM Studio, vLLM, Together, Gemini (via its /openai/
+     * Ollama, LM Studio, vLLM, Together, Gemini (via its /openai/
      * compatibility endpoint) and basically every OpenAI-compatible proxy.
      */
     OPENAI_COMPATIBLE(
@@ -47,10 +47,26 @@ enum class ApiProtocol(
         displayName = "Gemini (OpenAI-compat endpoint)",
         modelsPath = "/models",
         defaultBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai",
+    ),
+
+    /**
+     * OpenRouter preset — uses the same [OPENAI_COMPATIBLE] wire format but
+     * adds OpenRouter-specific HTTP headers (HTTP-Referer, X-Title) and the
+     * `provider` routing object to the request body. The preset pre-fills the
+     * base URL and exposes OpenRouter-specific form fields in the settings UI.
+     */
+    OPENROUTER(
+        displayName = "OpenRouter",
+        modelsPath = "/models",
+        defaultBaseUrl = "https://openrouter.ai/api/v1",
     );
 
-    /** Protocols backed by the same connector; GEMINI_* is a preset alias. */
-    val connector: ApiProtocol get() = if (this == GEMINI_OPENAI_COMPATIBLE) OPENAI_COMPATIBLE else this
+    /** Protocols backed by the same connector; presets resolve to their real protocol. */
+    val connector: ApiProtocol get() = when (this) {
+        GEMINI_OPENAI_COMPATIBLE -> OPENAI_COMPATIBLE
+        OPENROUTER -> OPENAI_COMPATIBLE
+        else -> this
+    }
 
     companion object {
         fun fromName(name: String?): ApiProtocol =

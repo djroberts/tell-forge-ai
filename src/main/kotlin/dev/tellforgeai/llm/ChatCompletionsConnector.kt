@@ -2,6 +2,7 @@ package dev.tellforgeai.llm
 
 import dev.tellforgeai.model.ApiProtocol
 import dev.tellforgeai.model.ProviderProfile
+import dev.tellforgeai.model.injectOpenRouterBody
 import com.intellij.openapi.diagnostic.Logger
 import dev.tellforgeai.settings.ApiKeyStore
 import kotlinx.coroutines.*
@@ -39,6 +40,27 @@ class ChatCompletionsConnector : LlmConnector {
         internal val HTTP = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
+            // Log only auth-header presence (never its value) at each network hop.
+            // OkHttp intentionally drops Authorization on cross-host redirects; this
+            // makes that visible instead of guessing when a server reports it missing.
+            .addNetworkInterceptor { chain ->
+                val request = chain.request()
+                val hasAuthorization = !request.header("Authorization").isNullOrBlank()
+                LOG.info(
+                    "TellForgeAI HTTP ${request.method} ${request.url.host}${request.url.encodedPath} " +
+                        "authorizationPresent=$hasAuthorization",
+                )
+                val response = chain.proceed(request)
+                if (response.isRedirect) {
+                    LOG.warn(
+                        "TellForgeAI HTTP redirect ${response.code} from " +
+                            "${request.url.host}${request.url.encodedPath} to " +
+                            "${response.header("Location") ?: "<no Location>"}; " +
+                            "OkHttp may remove Authorization across hosts",
+                    )
+                }
+                response
+            }
             .build()
         internal val JSON = Json { ignoreUnknownKeys = true }
 
@@ -106,7 +128,7 @@ class ChatCompletionsConnector : LlmConnector {
             protocol: ApiProtocol,
             apiKey: String? = null,
         ): Request {
-            val key = apiKey ?: ApiKeyStore.get(profile.id).orEmpty()
+            val key = apiKey ?: ApiKeyStore.resolve(profile)
             val builder = Request.Builder()
                 .url(profile.trimmedBaseUrl() + protocol.modelsPath)
             if (key.isNotBlank()) builder.header("Authorization", "Bearer $key")
@@ -150,8 +172,12 @@ class ChatCompletionsConnector : LlmConnector {
     ) {
         if (isRunning()) return
         val model = profile.modelFor(planMode)
-        val apiKey = ApiKeyStore.get(profile.id).orEmpty()
+        val apiKey = ApiKeyStore.resolve(profile)
         val url = profile.trimmedBaseUrl() + "/chat/completions"
+        if (apiKey.isBlank()) {
+            onEvent(LlmClient.Event.Error("No API key configured for provider '${profile.name}'. Add it in Settings → TellForgeAI Providers, click Apply, then retry."))
+            return
+        }
 
         val body = buildJsonObject {
             put("model", model)
@@ -162,12 +188,23 @@ class ChatCompletionsConnector : LlmConnector {
             if (tools.isNotEmpty()) {
                 put("tools", JsonArray(tools.map { toolSpecJson(it) }))
             }
+            // OpenRouter-specific body fields (provider routing, plugins, etc.)
+            injectOpenRouterBody(profile)
         }.toString()
 
         val request = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer $apiKey")
             .header("Accept", "text/event-stream")
+            .apply {
+                // OpenRouter-specific HTTP headers (site URL, app title)
+                if (profile.isOpenRouter) {
+                    profile.openRouterSiteUrl?.trim()?.takeIf { it.isNotEmpty() }
+                        ?.let { header("HTTP-Referer", it) }
+                    profile.openRouterAppTitle?.trim()?.takeIf { it.isNotEmpty() }
+                        ?.let { header("X-Title", it) }
+                }
+            }
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
 
@@ -201,6 +238,7 @@ class ChatCompletionsConnector : LlmConnector {
                             put("messages", JsonArray(history.map { it.toJson() }))
                             profile.reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }?.let { put("reasoning_effort", it) }
                             if (tools.isNotEmpty()) put("tools", JsonArray(tools.map { toolSpecJson(it) }))
+                            injectOpenRouterBody(profile)
                         }.toString()
                         call = HTTP.newCall(
                             request.newBuilder()
@@ -214,7 +252,20 @@ class ChatCompletionsConnector : LlmConnector {
                 }
                 if (!response.isSuccessful) {
                     val err = errBody ?: response.body?.string().orEmpty()
-                    onEvent(LlmClient.Event.Error("HTTP ${response.code}: ${err.take(500).ifBlank { response.message }}"))
+                    val sentAuthorization = !response.request.header("Authorization").isNullOrBlank()
+                    val finalUrl = response.request.url
+                    LOG.warn(
+                        "TellForgeAI provider response HTTP ${response.code}; " +
+                            "host=${finalUrl.host}, path=${finalUrl.encodedPath}, " +
+                            "authorizationPresent=$sentAuthorization",
+                    )
+                    onEvent(
+                        LlmClient.Event.Error(
+                            "HTTP ${response.code} from ${finalUrl.host}${finalUrl.encodedPath} " +
+                                "(Authorization header ${if (sentAuthorization) "was sent" else "was missing"}): " +
+                                err.take(500).ifBlank { response.message },
+                        ),
+                    )
                     return@launch
                 }
                 val source = response.body?.source() ?: run {

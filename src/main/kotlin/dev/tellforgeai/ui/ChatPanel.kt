@@ -27,6 +27,7 @@ import dev.tellforgeai.llm.Prompts
 import dev.tellforgeai.llm.ToolCall
 import dev.tellforgeai.model.ChatSession
 import dev.tellforgeai.model.ProviderProfile
+import dev.tellforgeai.settings.ApiKeyStore
 import dev.tellforgeai.settings.TellForgeAIChatsState
 import dev.tellforgeai.settings.TellForgeAIConfigurable
 import dev.tellforgeai.settings.TellForgeAIProjectState
@@ -759,14 +760,27 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         val profiles = TellForgeAISettings.getInstance().profiles()
         val currentItems = (0 until profileCombo.itemCount)
             .mapNotNull { profileCombo.getItemAt(it) as? ProviderProfile }
-        if (profiles == currentItems) return // nothing changed; avoid churn + duplicate action events
+        // Hydrate before comparing: profiles read from XML have apiKey="";
+        // compare both persisted fields and the key so key rotations in PasswordSafe
+        // are reflected when settings are applied and the dropdown is refreshed.
+        val hydrated = profiles.map { p ->
+            val key = ApiKeyStore.get(p.id).orEmpty()
+            if (key.isNotBlank()) p.copy(apiKey = key) else p
+        }
+        if (hydrated == currentItems) return // avoid unnecessary events/rebuilds
 
         val previouslySelectedId = (profileCombo.selectedItem as? ProviderProfile)?.id
             ?: TellForgeAIProjectState.getInstance(project).selectedProfileId
         profileCombo.removeAllItems()
-        profiles.forEach { profileCombo.addItem(it) }
-        val select = profiles.firstOrNull { it.id == previouslySelectedId } ?: profiles.firstOrNull()
+        hydrated.forEach { profileCombo.addItem(it) }
+        // Select from the HYDRATED list, NOT from the raw XML profiles list.
+        // A raw XML copy has apiKey="" because the key is @Transient.
+        val select = hydrated.firstOrNull { it.id == previouslySelectedId }
+            ?: hydrated.firstOrNull()
         if (select != null) profileCombo.selectedItem = select
+        else TellForgeAIProjectState.getInstance(project).selectedProfileId = null
+        TellForgeAIProjectState.getInstance(project).selectedProfileId = select?.id
+        if (select != null) ensureModelInfo(select)
     }
 
     private fun onProfileSelected() {
@@ -1015,7 +1029,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
      * until the model produces a final answer.
      */
     private fun startTurn() {
-        val profile = TellForgeAIProjectState.getInstance(project).selectedProfile() ?: return
+        // Use the combo item (carries the hydrated apiKey from PasswordSafe)
+        // rather than a raw XML copy which always has apiKey = "" (@Transient).
+        val profile = profileCombo.selectedItem as? ProviderProfile
+            ?: TellForgeAIProjectState.getInstance(project).selectedProfile()
+            ?: return
         ensureModelInfo(profile)
 
         // system prompt (with project context) is supplied fresh each request

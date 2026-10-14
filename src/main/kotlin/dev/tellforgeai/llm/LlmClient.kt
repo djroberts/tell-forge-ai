@@ -2,6 +2,7 @@ package dev.tellforgeai.llm
 
 import dev.tellforgeai.model.ApiProtocol
 import dev.tellforgeai.model.ProviderProfile
+import dev.tellforgeai.model.injectOpenRouterBody
 import dev.tellforgeai.settings.ApiKeyStore
 import kotlinx.serialization.json.*
 import kotlinx.coroutines.Dispatchers
@@ -74,7 +75,7 @@ class LlmClient {
         helperScope.launch {
             try {
                 val model = profile.modelFor(planMode)
-                val apiKey = ApiKeyStore.get(profile.id).orEmpty()
+                val apiKey = ApiKeyStore.resolve(profile)
                 val responsesApi = profile.apiProtocol.connector == ApiProtocol.OPENAI_RESPONSES
                 val requestJson = if (responsesApi) {
                     buildJsonObject {
@@ -98,6 +99,7 @@ class LlmClient {
                             }
                         }))
                         put("max_tokens", maxTokens.coerceAtLeast(128))
+                        injectOpenRouterBody(profile)
                     }
                 }
                 val requestBody = requestJson.toString().toRequestBody("application/json".toMediaType())
@@ -105,6 +107,14 @@ class LlmClient {
                 val request = okhttp3.Request.Builder()
                     .url(profile.trimmedBaseUrl() + endpoint)
                     .header("Authorization", "Bearer $apiKey")
+                    .apply {
+                        if (profile.isOpenRouter) {
+                            profile.openRouterSiteUrl?.trim()?.takeIf { it.isNotEmpty() }
+                                ?.let { header("HTTP-Referer", it) }
+                            profile.openRouterAppTitle?.trim()?.takeIf { it.isNotEmpty() }
+                                ?.let { header("X-Title", it) }
+                        }
+                    }
                     .post(requestBody)
                     .build()
                 Shared.http.newCall(request).execute().use { response ->
@@ -193,10 +203,28 @@ class LlmClient {
         apiKey: String?,
         onResult: (String) -> Unit,
     ) {
-        fetchModelsRaw(profile, apiKey) { body ->
-            onResult(body?.let { "Connection OK" }
-                ?: "Failed: endpoint unreachable or returned an error")
-        }
+        val request = ChatCompletionsConnector.modelsRequest(profile, profile.apiProtocol.connector, apiKey)
+        Shared.http.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                onResult("Failed: ${e.message ?: e.javaClass.simpleName}")
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.use {
+                    if (it.isSuccessful) {
+                        onResult("Connection OK")
+                    } else {
+                        val finalRequest = it.request
+                        val authPresent = !finalRequest.header("Authorization").isNullOrBlank()
+                        val detail = it.body?.string().orEmpty().take(500).ifBlank { it.message }
+                        onResult(
+                            "Failed: HTTP ${it.code} from ${finalRequest.url.host}${finalRequest.url.encodedPath} " +
+                                "(Authorization header ${if (authPresent) "present on final request" else "missing on final request"}): $detail",
+                        )
+                    }
+                }
+            }
+        })
     }
 
     /**

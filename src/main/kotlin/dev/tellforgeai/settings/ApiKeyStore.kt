@@ -3,6 +3,7 @@ package dev.tellforgeai.settings
 import com.intellij.credentialStore.CredentialAttributes
 import com.intellij.credentialStore.Credentials
 import com.intellij.ide.passwordSafe.PasswordSafe
+import dev.tellforgeai.model.ProviderProfile
 
 /**
  * Stores provider API keys in the IDE's PasswordSafe (macOS Keychain,
@@ -25,14 +26,25 @@ object ApiKeyStore {
 
     private fun attributes(profileId: String) = CredentialAttributes(PREFIX + profileId)
 
+    /** Read and normalize legacy entries as well as newly saved keys. */
     fun get(profileId: String): String? =
-        PasswordSafe.instance.get(attributes(profileId))?.getPasswordAsString()
+        PasswordSafe.instance.get(attributes(profileId))?.getPasswordAsString()?.trim()?.ifBlank { null }
 
+    /**
+     * Resolve from the transient in-memory profile value when available, then
+     * PasswordSafe. Normalize both so pasted/legacy surrounding whitespace does
+     * not make the Authorization header malformed.
+     */
+    fun resolve(profile: ProviderProfile): String =
+        profile.apiKey.trim().takeIf { it.isNotEmpty() } ?: get(profile.id).orEmpty()
+
+    /** Store only normalized credentials; blank input removes an existing key. */
     fun set(profileId: String, apiKey: String) {
-        if (apiKey.isBlank()) {
+        val normalized = apiKey.trim()
+        if (normalized.isEmpty()) {
             remove(profileId)
         } else {
-            PasswordSafe.instance.set(attributes(profileId), Credentials("TellForgeAI", apiKey))
+            PasswordSafe.instance.set(attributes(profileId), Credentials("TellForgeAI", normalized))
         }
     }
 
@@ -49,9 +61,8 @@ object ApiKeyStore {
         !get(profileId).isNullOrBlank() && settings.find(profileId) == null
 
     /**
-     * Re-links a PasswordSafe entry to a live profile id:
-     * copies the password from [fromId] into [toId]]. Used by the orphan
-     * "re-adopt" flow so a lost settings file can recover its keys.
+     * Re-links a PasswordSafe entry to a live profile id by copying the password
+     * from [fromId] into [toId]. Used by the orphan re-adopt flow.
      */
     fun reattach(fromId: String, toId: String) {
         get(fromId)?.let { set(toId, it) }

@@ -4,6 +4,17 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] - 2026-10-15
+
+### Added
+- Dedicated **OpenRouter** provider protocol: a new "OpenRouter" entry in the API-protocol dropdown that pre-fills `https://openrouter.ai/api/v1`, sends the OpenRouter-specific `HTTP-Referer` and `X-Title` headers, and exposes an OpenRouter-specific settings panel with site URL, app title, provider routing (`order`, `allow_fallbacks`, `ignore`, `only`, `sort`), quantization/data-collection/ZDR/require-parameters filters, `max_price` limits, preferred throughput/latency targets, `plugins` JSON and a catch-all extra-body JSON field (`feat(settings)`)
+- `injectOpenRouterBody` request-body enrichment in `ProviderProfile`, covered by new `OpenRouterBodyTest` unit tests (`feat(llm)`)
+
+### Fixed
+- API-key handling is now whitespace-safe: keys are trimmed when saved and when read, and `ApiKeyStore.resolve` prefers the transient in-memory value over PasswordSafe so freshly pasted keys are used without requiring an IDE restart (`fix(settings)`)
+- Clear error messages when no API key is configured instead of sending a request with a missing `Authorization` header; failed responses now log and report whether the Authorization header was actually sent, plus a network interceptor that logs auth-header presence and warns on cross-host redirects that may drop it (`fix(llm)`)
+- Provider dropdown in the chat panel now hydrates API keys before comparing profiles, so key rotations in PasswordSafe are reflected when settings are applied (`fix(ui)`)
+
 ## [0.6.0] - 2026-10-14
 
 ### Added
