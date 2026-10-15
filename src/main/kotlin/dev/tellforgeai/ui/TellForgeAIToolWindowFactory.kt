@@ -12,9 +12,22 @@ import com.intellij.ui.content.ContentFactory
 class TellForgeAIToolWindowFactory : ToolWindowFactory {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = ChatPanel(project)
-        val content = ContentFactory.getInstance().createContent(panel, "", false)
-        toolWindow.contentManager.addContent(content)
+        val contentFactory = ContentFactory.getInstance()
+        val chat = ChatPanel(project)
+        val instructions = InstructionsPanel(project)
+        with(toolWindow.contentManager) {
+            addContent(contentFactory.createContent(chat, "Chat", false))
+            addContent(contentFactory.createContent(instructions, "Instructions", false))
+        }
+        // Pick up content changes written behind our back (e.g. the agent
+        // pushing instructions_write results, or the Test button in the config
+        // dialog) when the user flips to this tab.
+        toolWindow.contentManager.addContentManagerListener(object :
+            com.intellij.ui.content.ContentManagerListener {
+            override fun selectionChanged(event: com.intellij.ui.content.ContentManagerEvent) {
+                (event.content.component as? InstructionsPanel)?.refresh()
+            }
+        })
     }
 }
 

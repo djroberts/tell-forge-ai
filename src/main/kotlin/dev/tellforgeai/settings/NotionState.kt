@@ -14,14 +14,14 @@ import com.intellij.openapi.project.Project
  * (see [ApiKeyStore.notionTokenId]). [notionEnabled] is the master on/off
  * switch: when false the notion_* tools are not offered to the model at all.
  * [notionWriteEnabled] is the one-time opt-in that lets the model mutate
- * Notion pages in Forge mode; it is only settable from the Configure Tela
- * Wiki dialog after a successful connection test.
+ * Notion pages in Forge mode; it is only settable from the Configure
+ * Integrations dialog after a successful connection test.
  *
  * Approval per action ([notionSkipCreate], [notionSkipUpdate],
  * [notionSkipDelete], see [WikiWriteAction]): true = the per-write
  * confirmation dialog is skipped for that action; false (the default) = each
  * mutating call asks via a dialog ("Ask permission to add/update/delete
- * page" checkboxes in the Configure Tela Wiki dialog).
+ * page" checkboxes in the Configure Integrations dialog).
  */
 @Service(Service.Level.PROJECT)
 @State(name = "TellForgeAINotionState", storages = [Storage("tellforgeai.notion.xml")])
@@ -38,6 +38,13 @@ class NotionState : PersistentStateComponent<NotionState.State> {
         var skipApprovalCreate: Boolean = false
         var skipApprovalUpdate: Boolean = false
         var skipApprovalDelete: Boolean = false
+
+        // ---- Write root (writes confined to this page's subtree; empty = unrestricted) ----
+        /** Notion page or database id (no dashes) of the write root. Empty = unrestricted. */
+        var writeRootId: String = ""
+
+        /** Display cache (title) for the dialog; cosmetic, re-verified lazily. */
+        var writeRootDisplay: String = ""
     }
 
     private var state = State()
@@ -73,6 +80,20 @@ class NotionState : PersistentStateComponent<NotionState.State> {
             WikiWriteAction.UPDATE -> state.skipApprovalUpdate = skip
             WikiWriteAction.DELETE -> state.skipApprovalDelete = skip
         }
+    }
+
+    /** Configured write-root id (page or database, dashes stripped), or "" when unrestricted. */
+    fun writeRootId(): String = state.writeRootId
+
+    fun setWriteRootId(value: String) {
+        state.writeRootId = value
+    }
+
+    /** Cached display title of the write root (cosmetic only). */
+    fun writeRootDisplay(): String = state.writeRootDisplay
+
+    fun setWriteRootDisplay(value: String) {
+        state.writeRootDisplay = value
     }
 
     /** Stored per-project token from PasswordSafe, or null. */

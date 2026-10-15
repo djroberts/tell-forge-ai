@@ -4,6 +4,35 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] - 2026-10-18
+
+### Fixed
+- Configured Notion write roots refused ALL writes under them, including children of the root itself: Notion returns ids dashed (search results, raw UUID args) while the persisted root id is store dashless, so every id comparison failed and the containment walk classified the target as outside the root ("parent 'TellForgeAI' is outside it" with the root set to TellForgeAI). All Notion ids are now compared in a canonical dashless form — `WriteRoot.normalizeNotionId`, applied in `isUnderNotionRoot`, `writePage`/`updatePage`/`appendBlocks`, and `resolveTitleToId` (`fix(tools)`)
+- Write-root picker in Configure Integrations now shows real page titles instead of raw Notion UUIDs (pages via the existing title extraction, databases via the `title` rich-text array) with the id kept at the end (`fix(ui)`)
+- The same tela search that fed the picker is ranked full-text over titles AND bodies, so a title like "child" was buried under unrelated body-matches. Title matches are now bubbled to the top of the suggestions list, and each hit shows its breadcrumb (Space › Parent › …) so same-titled pages can be told apart (`fix(ui)`)
+- The suggestions popup opened centered on the write-root field, covering what was typed, and grabbing focus meant further keystrokes never reached the field. It now opens just below the field, unfocusable and refreshed in place (`fix(ui)`)
+
+
+### Changed
+- The separate **Wiki** and **Config** toolbar buttons were merged into a single **Integrations** button: "Configure Tela Wiki" and "Configure Instructions Repo" are now three tabs of one "Configure Integrations" dialog (Tela wiki · Notion · AI instructions), each with a one-line info banner and a tab tooltip so the purpose of each integration is visible on sight. All existing per-tab behaviour — connection tests, write opt-ins and per-action approval toggles — is unchanged. Model-facing tool hints now point at "Configure Integrations…" instead of the removed dialog names (`feat(ui)`)
+
+### Fixed
+- `notion_search` with an empty query now lists all pages the integration can access: the `query` field is omitted rather than sent as `""` (Notion treats the two differently); also hardened title parsing against unexpected JSON shapes (`fix(tools)`)
+- The Configure Instructions Repo "Test / Sync now" result showed raw HTML tags (`<html>`, `<br>`, `<b>`) as literal text: the timer prefix ("after 1s —") was prepended outside the `<html>` opening tag, so Swing fell back to plain-text rendering. All result strings are now wrapped in a single well-formed HTML label update (`fix(ui)`)
+- A successful auto-seed of a default `INSTRUCTIONS.md` was reported in the sync result as "Error: … Instructions loaded anyway". Informational sync outcomes (seeded default, missing branch created locally) now travel in a dedicated `Snapshot.note` field and are shown as a success note, reserving `error` for real failures (`fix(llm)`)
+
+### Added
+- **Instructions tab** in the tool window (next to Chat): a live mono editor for the repo's canonical `INSTRUCTIONS.md` with a tight status line (`synced 2m ago (3 files)`), Sync now, Open in editor, Configure…, and Save & push… — saving goes through the same diff-preview → approval → commit+push path (and write opt-in) the agent's `instructions_write` uses, with a Revert for unsaved edits. Unsaved edits are never silently overwritten by a background refresh (`feat(ui)`)
+- `notion_describe_database` agent tool: describes a Notion database's schema (property names, types and select/status/multi-select options via `GET /v1/databases/{id}`); read-only, both modes, no approval. `notion_query_database`'s spec now tells the model to call it first instead of guessing property names, and a `validation_error` on a query now auto-fetches and appends the schema so the agent self-corrects in one round trip (`feat(tools)`)
+- Canonical `INSTRUCTIONS.md` convention: bootstrapping an empty instructions repo now seeds a starter `INSTRUCTIONS.md` (guidelines-for-writing-guidelines starter content) instead of an empty tree that would only produce the confusing "no .md files" error again (`feat(llm)`)
+- Instructions-local paths in `instructions_write` and the UI editor are now rebased onto the repo root for git (`add` / `checkout` / `reset`) when a `subpath` is configured — previously `git add` ran against a path relative to the content root and silently no-opped (or failed) for subpath repos (`feat(llm)`)
+
+### Changed
+- The "no .md files found" sync error is now self-diagnosing: it appends a listing of what the repo actually contains (`repo contains: README.md, docs/ …`) and a distinct message when the configured subdirectory itself is missing — previously the bare message left you guessing whether the branch was empty, the files were in a subdir, or the URL was wrong (`fix(llm)`)
+- Instructions-repo layer: a new **Config** button (next to Wiki) opens "Configure Instructions Repo", pointing a project at a separate — typically private and versioned — git repository that holds AI agent instructions kept out of (possibly public) project repositories. Accepted URLs: `owner/repo[/subdir]`, full https/ssh URLs, optional `#subdir` fragment. The plugin shallow-clones into the plugin temp dir, refreshes on a TTL, and keeps the merged markdown in memory so building a system prompt never runs git; on failure the last-known-good copy is served. Instructions are injected as a "User instructions (configuration repo)" section of the system prompt (`feat(settings)`)
+- Two agent tools for that repo: `instructions_read` (both modes, returns the raw merged markdown) and `instructions_write` (Forge only, requires a separate write opt-in): writes the content, shows the diff, and — after an always-on approval dialog, even when command approval is disabled — commits and pushes to the repo, with a polite `pull --rebase` retry on push rejection; declining reverts the working-tree change (`feat(tools)`)
+- Tests for the instructions-repo URL parsing (`owner/repo`, subdirectories, `#fragment`, ssh/https forms, rejection of host-prefixed input) (`test(settings)`)
+
 ## [0.7.3] - 2026-10-17
 
 ### Added

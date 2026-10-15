@@ -2,7 +2,8 @@ package dev.tellforgeai.llm
 
 object Prompts {
 
-    fun system(planMode: Boolean, projectContext: String): String = base(planMode, projectContext) + when (planMode) {
+    fun system(planMode: Boolean, projectContext: String, extraInstructions: String = ""): String =
+        base(planMode, projectContext, extraInstructions) + when (planMode) {
         true -> """
             |
             |In FORETELL mode:
@@ -30,7 +31,7 @@ object Prompts {
         """.trimMargin()
     }
 
-    private fun base(planMode: Boolean, projectContext: String): String = """
+    private fun base(planMode: Boolean, projectContext: String, extraInstructions: String = ""): String = """
         |You are TellForgeAI, an expert software engineering assistant working inside a JetBrains IDE
         |(WebStorm / PhpStorm). You are currently in ${if (planMode) "FORETELL" else "FORGE"} mode.
         |
@@ -82,6 +83,25 @@ object Prompts {
         |     then state exactly what you checked and where, so the user can correct you.
         |  Never phrase a single failed `which` as "X isn't available in this environment".
         |
+        |${if (extraInstructions.isNotBlank()) extraInstructionsSection(extraInstructions) else ""}
+        |
         |$projectContext
+    """.trimMargin()
+
+    /**
+     * User-maintained instructions from the separate configuration repo
+     * (versioned, see the 'Configure Instructions Repo' dialog). These are
+     * trusted configuration from the user's own repo, ranked next to the
+     * project context — but the project context below takes precedence when
+     * they describe this repository specifically.
+     */
+    private fun extraInstructionsSection(text: String): String = """
+        |## User instructions (configuration repo)
+        |
+        |The instructions below are maintained by the user in a separate, versioned
+        |configuration repo. Follow them as standing instructions for your behavior
+        |and workflow in this and other projects.
+        |
+        |$text
     """.trimMargin()
 }
