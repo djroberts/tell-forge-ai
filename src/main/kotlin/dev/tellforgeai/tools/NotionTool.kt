@@ -24,11 +24,15 @@ import java.util.concurrent.TimeUnit
  * as a bearer header plus the mandatory `Notion-Version` header. The token is
  * stored in PasswordSafe per project (see [NotionState]); nothing else roams.
  *
- * Exposes nine TellForgeAI tools:
+ * Exposes ten TellForgeAI tools:
  *  - `notion_search`         — POST /v1/search (both modes, no approval)
  *  - `notion_read_page`      — page flattened to markdown-ish text, optional
  *                              block-id markers (both modes, no approval)
  *  - `notion_query_database` — POST /v1/databases/{id}/query (both modes)
+ *  - `notion_describe_database` — GET /v1/databases/{id}: schema (property
+ *                              names/types/options) so filters aren't guessed
+ *                              (both modes); also auto-attached to query
+ *                              validation_error failures
  *  - `notion_write_page`     — POST /v1/pages, PAGE parent, paragraph blocks
  *  - `notion_append_blocks`  — PATCH /v1/blocks/{page}/children, extends an
  *                              existing page instead of duplicating it
@@ -71,15 +75,30 @@ object NotionTool {
 
     // ------------------------------------------------------------ tool entry
 
+    /**
+     * Raw search results as JSON for the integrations dialog's write-root
+     * picker: same POST /v1/search as [search], without formatting.
+     */
+    internal fun searchForPicker(project: Project, query: String): Result<JsonObject> {
+        val payload = buildJsonObject {
+            if (query.isNotEmpty()) put("query", query)
+            put("page_size", 8)
+        }
+        return post(project, "/search", payload)
+    }
+
     fun search(project: Project, args: JsonObject): String {
         val query = VfsTools.str(args, "query")?.trim().orEmpty()
-        val resp = post(project, "/search", buildJsonObject {
-            put("query", query)
+        // Empty query = list accessible pages: the "query" field must be OMITTED,
+        // not set to "" (Notion's /v1/search with no query lists everything the
+        // integration can see; sending "" behaves differently).
+        val payload = buildJsonObject {
+            if (query.isNotEmpty()) put("query", query)
             put("page_size", 20)
-        })
-        return resp.fold(
+        }
+        return post(project, "/search", payload).fold(
             onSuccess = { body ->
-                val results = body["results"]?.jsonArray ?: return@fold "No Notion results for '$query'."
+                val results = body.safeArray("results")
                 if (results.isEmpty()) return@fold "No Notion results for '$query'."
                 buildString {
                     append("Notion results for '").append(query.ifEmpty { "(all)" }).append("':\n")
@@ -137,9 +156,41 @@ object NotionTool {
             ?: throw IllegalArgumentException("title required")
         val content = VfsTools.str(args, "content").orEmpty()
         val parent = VfsTools.str(args, "parent")?.trim()
+
+        // Write-root handling: when a root is configured, creates are pinned
+        // to the root (a page parent, or rows in a database root) and the
+        // model's parent arg is overridden or rejected.
+        val rootId = NotionState.getInstance(project).writeRootId()
+        var pinnedParent: String? = null
+        var pinnedIsDatabase = false
+        if (rootId.isNotEmpty()) {
+            // Normalize to the dashless canonical form so comparison with
+            // rootId (stored dashless) is like-for-like — Notion search
+            // results and raw UUID args arrive dashed (see
+            // WriteRoot.normalizeNotionId for why this matters).
+            val resolvedRequestedParent = parent?.let {
+                (if (looksLikeUuid(it)) it else resolveTitleToId(project, it))
+                    ?.let(WriteRoot::normalizeNotionId)
+            }
+            if (resolvedRequestedParent != null && resolvedRequestedParent != rootId &&
+                !WriteRoot.isUnderNotionRoot(project, resolvedRequestedParent, rootId)
+            ) {
+                return WriteRoot.outsideRootError("Notion", rootId, "parent '$parent'")
+            }
+            // The root page itself is a valid direct parent.
+            pinnedParent = rootId
+            pinnedIsDatabase = !looksLikeUuidPage(project, rootId)
+            if (parent != null && resolvedRequestedParent != rootId) {
+                // Requested parent inside the root subtree: honor it.
+                pinnedParent = resolvedRequestedParent
+            }
+        }
+
         if (approve(project, WikiWriteAction.CREATE, "Notion write",
                 "TellForgeAI wants to create this Notion page:" +
-                    (parent?.let { "\n\nParent: $it" } ?: "\n\nParent: (no parent — Notion requires one)") +
+                    (pinnedParent?.let {
+                        "\n\nParent: $it" + (if (pinnedIsDatabase) " (database root — the page becomes a row)" else "")
+                    } ?: "\n\nParent: (no parent — Notion requires one)") +
                     "\n\nTitle: $title\n\nAllow?",
             ).not()
         ) {
@@ -147,6 +198,7 @@ object NotionTool {
         }
 
         val parentId = when {
+            pinnedParent != null -> pinnedParent
             parent == null -> null
             looksLikeUuid(parent) -> parent
             else -> resolveTitleToId(project, parent)
@@ -156,7 +208,11 @@ object NotionTool {
             "(or search for one with notion_search and pass its id)."
 
         val payload = buildJsonObject {
-            put("parent", buildJsonObject { put("page_id", parentId) })
+            if (pinnedIsDatabase && parentId == rootId) {
+                put("parent", buildJsonObject { put("database_id", parentId) })
+            } else {
+                put("parent", buildJsonObject { put("page_id", parentId) })
+            }
             put("properties", buildJsonObject {
                 put("title", buildJsonObject {
                     put("title", JsonArray(listOf(buildJsonObject {
@@ -200,21 +256,29 @@ object NotionTool {
             ?: throw IllegalArgumentException("content required (markdown)")
         val targetId = if (looksLikeUuid(page)) page else resolveTitleToId(project, page)
             ?: return "Error: no Notion page titled '$page'. Use notion_search to find the exact title."
+        // Canonical (dashless) form for the ancestry walk and messages —
+        // resolveTitleToId normalizes, but a raw UUID arg may arrive dashed.
+        val targetNorm = WriteRoot.normalizeNotionId(targetId)
+        // Write-root gate: the target page must sit inside the root subtree.
+        val rootId = NotionState.getInstance(project).writeRootId()
+        if (rootId.isNotEmpty() && !WriteRoot.isUnderNotionRoot(project, targetNorm, rootId)) {
+            return WriteRoot.outsideRootError("Notion", rootId, "page '$page' (id $targetNorm)")
+        }
 
         if (approve(project, WikiWriteAction.CREATE, "Notion append",
                 "TellForgeAI wants to append ${content.length} chars of content to Notion page " +
-                    "'$page' (id $targetId).\n\nAllow?",
+                    "'$page' (id $targetNorm).\n\nAllow?",
             ).not()
         ) return "Notion append declined by the user."
 
         // Children of a PAGE work directly; otherwise the id must be a block id.
         val blocks = content.toBlocks()
-        return patch(project, "/blocks/$targetId/children", buildJsonObject {
+        return patch(project, "/blocks/$targetNorm/children", buildJsonObject {
             put("children", blocks)
         }).fold(
             onSuccess = { resp ->
                 val count = resp["results"]?.jsonArray?.size ?: blocks.size
-                "Appended $count block(s) to Notion page '$page' (id $targetId)."
+                "Appended $count block(s) to Notion page '$page' (id $targetNorm)."
             },
             onFailure = { e ->
                 "Error: notion_append_blocks failed — ${describe(e)}" +
@@ -244,11 +308,32 @@ object NotionTool {
 
         val pageId = if (looksLikeUuid(page)) page else resolveTitleToId(project, page)
             ?: return "Error: no Notion page titled '$page'. Use notion_search to find the exact title."
+        // Canonical form for the root gates and API path (raw UUID args may
+        // arrive dashed; see WriteRoot.normalizeNotionId).
+        val pageNorm = WriteRoot.normalizeNotionId(pageId)
 
         var parentId: String? = null
         if (parent != null) {
             parentId = if (looksLikeUuid(parent)) parent else resolveTitleToId(project, parent)
                 ?: return "Error: no Notion page titled '$parent' to use as parent."
+            parentId = WriteRoot.normalizeNotionId(parentId)
+        }
+
+        // Write-root gate: target must be inside the root subtree (moving the
+        // root itself or anything outside is out of scope), and a move's new
+        // parent must land inside the subtree too — a move is otherwise the
+        // escape hatch that defeats confinement.
+        val rootId = NotionState.getInstance(project).writeRootId()
+        if (rootId.isNotEmpty()) {
+            if (!WriteRoot.isUnderNotionRoot(project, pageNorm, rootId)) {
+                return WriteRoot.outsideRootError("Notion", rootId, "page '$page' (id $pageNorm)")
+            }
+            if (parentId != null &&
+                parentId != rootId &&
+                !WriteRoot.isUnderNotionRoot(project, parentId, rootId)
+            ) {
+                return WriteRoot.outsideRootError("Notion", rootId, "move destination '$parent'")
+            }
         }
 
         val summary = listOfNotNull(
@@ -262,7 +347,7 @@ object NotionTool {
         val action = if (archive) WikiWriteAction.DELETE else WikiWriteAction.UPDATE
         val verb = if (archive) "delete" else "update"
         if (approve(project, action, "Notion $verb",
-                "TellForgeAI wants to $verb Notion page '$page' (id $pageId): $summary.\n\nAllow?",
+                "TellForgeAI wants to $verb Notion page '$page' (id $pageNorm): $summary.\n\nAllow?",
             ).not()
         ) return "Notion $verb declined by the user."
 
@@ -281,8 +366,8 @@ object NotionTool {
                 put("parent", buildJsonObject { put("page_id", parentId) })
             }
         }
-        return patch(project, "/pages/$pageId", payload).fold(
-            onSuccess = { "Updated Notion page '$page' (id $pageId): $summary." },
+        return patch(project, "/pages/$pageNorm", payload).fold(
+            onSuccess = { "Updated Notion page '$page' (id $pageNorm): $summary." },
             onFailure = { e ->
                 "Error: notion_update_page failed — ${describe(e)}" +
                     (if ((e as? ApiException)?.code == "validation_error" && parent != null)
@@ -315,6 +400,14 @@ object NotionTool {
         val content = VfsTools.str(args, "content")
             ?: throw IllegalArgumentException("content required (new text for the block)")
         val archive = (args["archive"]?.jsonPrimitive?.content ?: "").equals("true", ignoreCase = true)
+
+        // Write-root gate: the block's page must sit inside the root subtree.
+        // The block's own parent chain is the same walk (blocks carry the
+        // same parent object, eventually naming the page).
+        val rootId = NotionState.getInstance(project).writeRootId()
+        if (rootId.isNotEmpty() && !WriteRoot.isUnderNotionRoot(project, blockId, rootId)) {
+            return WriteRoot.outsideRootError("Notion", rootId, "block $blockId")
+        }
 
         if (approve(project, WikiWriteAction.UPDATE, "Notion block edit",
                 "TellForgeAI wants to ${if (archive) "remove (archive)" else "replace the text of"} " +
@@ -358,6 +451,23 @@ object NotionTool {
         }
     }
 
+    /**
+     * True when [id] resolves to a PAGE (not a database) — used to decide
+     * whether a database-root create needs `parent.database_id` instead of
+     * `parent.page_id`. Cheap: one GET, cached for the session.
+     */
+    private fun looksLikeUuidPage(project: Project, id: String): Boolean {
+        val key = WriteRoot.normalizeNotionId(id)
+        val cached = rootKindCache[key]
+        if (cached != null) return cached
+        val isPage = NotionTool.getForRootCheck(project, "/pages/$key").isSuccess
+        rootKindCache[key] = isPage
+        return isPage
+    }
+
+    /** Session cache for [looksLikeUuidPage]: normalized root id → is-a-page. */
+    private val rootKindCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
     // ------------------------------------------------------------ file upload
 
     /**
@@ -387,6 +497,19 @@ object NotionTool {
         }
         val filename = vf.name
         val contentType = guessMimeType(filename)
+
+        // Write-root gate: attaching to a page outside the root subtree is
+        // out of scope (the upload itself is harmless without a target page).
+        if (page != null) {
+            val rootId = NotionState.getInstance(project).writeRootId()
+            if (rootId.isNotEmpty()) {
+                val pageId0 = if (looksLikeUuid(page)) page else resolveTitleToId(project, page)
+                    ?: return "Error: no Notion page titled '$page'. Use notion_search to find the exact title."
+                if (!WriteRoot.isUnderNotionRoot(project, pageId0, rootId)) {
+                    return WriteRoot.outsideRootError("Notion", rootId, "page '$page'")
+                }
+            }
+        }
 
         val action = listOfNotNull(
             "upload '$path' (${bytes.size} bytes)",
@@ -493,6 +616,18 @@ object NotionTool {
             return "Error: pass either page (page id or title) or discussionId."
         }
 
+        // Write-root gate: commenting is a mutation on the target page.
+        if (page != null) {
+            val rootId = NotionState.getInstance(project).writeRootId()
+            if (rootId.isNotEmpty()) {
+                val pageId0 = if (looksLikeUuid(page)) page else resolveTitleToId(project, page)
+                    ?: return "Error: no Notion page titled '$page'. Use notion_search to find the exact title."
+                if (!WriteRoot.isUnderNotionRoot(project, pageId0, rootId)) {
+                    return WriteRoot.outsideRootError("Notion", rootId, "page '$page'")
+                }
+            }
+        }
+
         if (approve(project, WikiWriteAction.CREATE, "Notion comment",
                 "TellForgeAI wants to comment on Notion " +
                     (page?.let { "page '$it'" } ?: "discussion $discussionId") + ":\n\n" +
@@ -537,19 +672,19 @@ object NotionTool {
     private fun requireWriteEnabled(project: Project): String? = when {
         !NotionState.getInstance(project).configured(project) ->
             "Error: Notion is not configured for this project. " +
-                "Ask the user to open 'Configure Tela Wiki…' (Wiki button in the tool window), " +
+                "Ask the user to open 'Configure Integrations…' (Integrations button in the tool window), " +
                 "Notion tab, paste an integration token and press 'Test connection'."
         !NotionState.getInstance(project).writeEnabled() ->
             "Error: Notion writes are not enabled for this project. " +
                 "Ask the user to tick 'Allow the agent to create, update and delete Notion pages' " +
-                "in the Configure Tela Wiki dialog."
+                "in the Configure Integrations dialog (Notion tab)."
         else -> null
     }
 
     /**
      * Per-action approval for mutating Notion tools, keyed by
      * [WikiWriteAction]: when the action's "Ask permission to … page"
-     * checkbox is unchecked in the Configure Tela Wiki dialog (skip), the
+     * checkbox is unchecked in the Configure Integrations dialog (skip), the
      * call proceeds without a confirmation dialog.
      */
     private fun approve(project: Project, action: WikiWriteAction, message: String, title: String): Boolean {
@@ -560,12 +695,12 @@ object NotionTool {
     // ------------------------------------------------------- title helpers
 
     /** Extracts the title property value from a page/search-result object. */
-    private fun pageTitle(o: JsonObject): String {
-        val props = o["properties"]?.jsonObject ?: return "(untitled)"
+    internal fun pageTitle(o: JsonObject): String {
+        val props = o["properties"] as? JsonObject ?: return "(untitled)"
         for ((_, v) in props) {
-            val vo = runCatching { v.jsonObject }.getOrNull() ?: continue
+            val vo = v as? JsonObject ?: continue
             if (vo["type"]?.jsonPrimitive?.content == "title") {
-                val arr = vo["title"]?.jsonArray ?: continue
+                val arr = vo["title"] as? JsonArray ?: continue
                 return arr.joinToString("") { (it as? JsonObject)?.get("plain_text")?.jsonPrimitive?.content.orEmpty() }
                     .ifBlank { "(untitled)" }
             }
@@ -585,11 +720,12 @@ object NotionTool {
         for (hit in hits) {
             val o = runCatching { hit.jsonObject }.getOrNull() ?: continue
             if (pageTitle(o).equals(title, ignoreCase = true)) {
-                return o["id"]?.jsonPrimitive?.content
+                return o["id"]?.jsonPrimitive?.content?.let(WriteRoot::normalizeNotionId)
             }
         }
         // Fall back to the top hit.
         return (hits.firstOrNull() as? JsonObject)?.get("id")?.jsonPrimitive?.content
+            ?.let(WriteRoot::normalizeNotionId)
     }
 
     // ------------------------------------------------------------ blocks → markdown
@@ -704,15 +840,82 @@ object NotionTool {
             },
             onFailure = { e ->
                 val hint = (e as? ApiException)?.code?.let { code ->
-                    if (code == "validation_error")
-                        " (the id may be a page, not a database — databases appear in " +
+                    when (code) {
+                        "validation_error" -> {
+                            // Blind-guessing a property name is the most common
+                            // failure here: auto-fetch the schema so the agent
+                            // self-corrects in one round trip.
+                            val schema = runCatching { describeSchema(project, dbId) }.getOrNull()
+                            " (property name or filter shape may be wrong)" +
+                                (schema?.let { "\n\n$schema" } ?: "")
+                        }
+                        else -> " (the id may be a page, not a database — databases appear in " +
                             "notion_search results only when they are shared with the integration)"
-                    else null
+                    }
                 }
                 "Error: notion_query_database failed — ${describe(e)}$hint"
             },
         )
     }
+
+    /**
+     * Describes a database's schema (property names, types and select/status/
+     * multi-select options) via GET /v1/databases/{id}. Read-only, both modes.
+     * Call this before writing a filter/sorts for notion_query_database instead
+     * of guessing property names.
+     */
+    fun describeDatabase(project: Project, args: JsonObject): String {
+        val db = VfsTools.str(args, "database")?.trim()
+            ?: throw IllegalArgumentException("database required (database id, page id or title)")
+        val dbId = if (looksLikeUuid(db)) db else resolveTitleToId(project, db)
+            ?: return "Error: no Notion page/database titled '$db'. Use notion_search to find the exact title."
+
+        val schema = runCatching { describeSchema(project, dbId) }
+        return schema.fold(
+            onSuccess = { it },
+            onFailure = { e ->
+                "Error: notion_describe_database failed — ${describe(e)}" +
+                    (if ((e as? ApiException)?.code == "validation_error")
+                        " (the id may be a page, not a database)" else "")
+            },
+        )
+    }
+
+    /** Fetches GET /v1/databases/{id} and formats the properties schema. */
+    private fun describeSchema(project: Project, dbId: String): String {
+        val meta = get(project, "/databases/$dbId")
+            .getOrElse { throw it }
+        val title = pageTitle(meta)
+        val props = meta["properties"] as? JsonObject
+        if (props.isNullOrEmpty()) return "Database '$title' (id $dbId) has no properties."
+        val sb = StringBuilder()
+        sb.append("Database '").append(title).append("' schema (id ").append(dbId).append("):\n")
+        for ((name, v) in props) {
+            val vo = v as? JsonObject ?: continue
+            val type = vo["type"]?.jsonPrimitive?.content ?: "?"
+            val opts = when (type) {
+                "select" -> vo["select"]?.let { options(it) }
+                "multi_select" -> vo["multi_select"]?.let { options(it) }
+                "status" -> {
+                    val groups = vo["status"] as? JsonObject
+                    (groups?.get("options") as? JsonArray)?.let { options(it) }
+                }
+                else -> null
+            }
+            sb.append("\n- ").append(name).append(": ").append(type)
+            if (!opts.isNullOrEmpty()) sb.append(" (options: ").append(opts).append(")")
+        }
+        sb.append("\n\nUse these exact property names in notion_query_database filter/sorts.")
+        return truncate(sb.toString())
+    }
+
+    /** Formats a select/multi_select/status "options" JsonArray as option names. */
+    private fun options(container: kotlinx.serialization.json.JsonElement): String =
+        (container as? JsonObject)?.get("options")?.let { options(it) }
+            ?: (container as? JsonArray)?.joinToString(", ") { el ->
+                (el as? JsonObject)?.get("name")?.jsonPrimitive?.content ?: "?"
+            }
+            ?: ""
 
     // ------------------------------------------------------------ markdown → blocks
 
@@ -775,7 +978,7 @@ object NotionTool {
 
     // ------------------------------------------------------- connection test
 
-    /** Used by the Configure Tela Wiki dialog (Notion tab): verifies the token. */
+    /** Used by the Configure Integrations dialog (Notion tab): verifies the token. */
     fun testConnection(token: String): String {
         if (token.isBlank()) return "⚠ Enter an integration token (Notion: Settings → Connections " +
             "→ new internal integration)."
@@ -804,6 +1007,9 @@ object NotionTool {
 
     private fun get(project: Project, path: String) =
         request("GET", API + path, token(project), null)
+
+    /** Package-visible GET for [WriteRoot]'s ancestry walk / verification. */
+    internal fun getForRootCheck(project: Project, path: String) = get(project, path)
 
     private fun post(project: Project, path: String, payload: JsonObject) =
         request("POST", API + path, token(project), payload.toString().toRequestBody("application/json".toMediaType()))
@@ -852,7 +1058,21 @@ object NotionTool {
 
     // ------------------------------------------------------------ diagnostics
 
+    internal fun describePublic(e: Throwable): String = describe(e)
+
     private fun describe(e: Throwable): String = e.message ?: e.javaClass.simpleName
+
+    /**
+     * Elvis (?:) does NOT catch throw-on-type-mismatch for kotlinx accessors:
+     * `body["results"]?.jsonArray` throws when the field is a JsonObject, which
+     * escapes the tool and surfaces as "Element … is not a JsonArray". This
+     * safe accessor returns an empty list instead, so malformed/unexpected
+     * responses degrade to "no results" rather than an opaque error.
+     */
+    private fun JsonObject.safeArray(key: String): List<JsonObject> =
+        runCatching {
+            (this[key] as? JsonArray)?.mapNotNull { it as? JsonObject }
+        }.getOrNull() ?: emptyList()
 
     private fun truncate(s: String) = if (s.length > MAX_OUTPUT_CHARS) {
         s.take(MAX_OUTPUT_CHARS) + "\n\n[output truncated at $MAX_OUTPUT_CHARS characters]"

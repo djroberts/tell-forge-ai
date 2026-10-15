@@ -14,8 +14,8 @@ import com.intellij.openapi.project.Project
  * (see [ApiKeyStore.wikiTokenId]). [wikiEnabled] is the master on/off switch:
  * when false the wiki_* tools are not offered to the model at all.
  * [wikiWriteEnabled] is the one-time opt-in that lets the model create/update
- * wiki pages in Forge mode; it is only settable from the Configure Tela Wiki
- * dialog after a successful connection test.
+ * wiki pages in Forge mode; it is only settable from the Configure
+ * Integrations dialog after a successful connection test.
  *
  * Approval per action (see [WikiWriteAction]): [wikiSkipCreate] /
  * [wikiSkipUpdate] / [wikiSkipDelete] — true skips the confirmation dialog
@@ -42,6 +42,16 @@ class TellForgeAIWikiState : PersistentStateComponent<TellForgeAIWikiState.State
         var wikiSkipCreate: Boolean = false
         var wikiSkipUpdate: Boolean = false
         var wikiSkipDelete: Boolean = false
+
+        // ---- Write root (writes confined to this page's subtree; empty = unrestricted) ----
+        /** Numeric tela page id of the write root. Empty = writes allowed anywhere. */
+        var writeRootId: String = ""
+
+        /** Display cache (title) for the dialog; cosmetic, re-verified lazily. */
+        var writeRootDisplay: String = ""
+
+        /** The root page's space (captured at verify time); creates are coerced here. */
+        var writeRootSpaceId: String = ""
     }
 
     private var state = State()
@@ -100,6 +110,35 @@ class TellForgeAIWikiState : PersistentStateComponent<TellForgeAIWikiState.State
             WikiWriteAction.DELETE -> state.wikiSkipDelete = skip
         }
     }
+
+    /** Configured write-root page id, or "" when writes are unrestricted. */
+    fun writeRootId(): String = state.writeRootId
+
+    fun setWriteRootId(value: String) {
+        if (state.writeRootId != value) ancestryCache.clear()
+        state.writeRootId = value
+    }
+
+    /** Cached display title of the write root (cosmetic only). */
+    fun writeRootDisplay(): String = state.writeRootDisplay
+
+    fun setWriteRootDisplay(value: String) {
+        state.writeRootDisplay = value
+    }
+
+    /** The root page's space id (captured at verify time), or "". */
+    fun writeRootSpaceId(): String = state.writeRootSpaceId
+
+    fun setWriteRootSpaceId(value: String) {
+        state.writeRootSpaceId = value
+    }
+
+    /**
+     * Per-session ancestry-chain cache for write-root checks: pageId → its
+     * known chain of ancestors (as a list ending at the root or top). Invalidated
+     * whenever the root id changes.
+     */
+    val ancestryCache: MutableMap<String, List<String>> = java.util.concurrent.ConcurrentHashMap()
 
     /** Stored per-project token from PasswordSafe, or null. */
     fun token(project: Project): String? = ApiKeyStore.get(ApiKeyStore.wikiTokenId(project))

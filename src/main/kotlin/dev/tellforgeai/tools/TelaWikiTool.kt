@@ -126,26 +126,48 @@ object TelaWikiTool {
 
         if (!state.configured(project)) {
             return "Error: no tela wiki is configured for this project. " +
-                "Ask the user to open 'Configure Tela Wiki…' (Wiki button in the tool window), " +
+                "Ask the user to open 'Configure Integrations…' (Integrations button in the tool window), " +
                 "paste an access token and press 'Test connection'."
         }
         if (!state.writeEnabled()) {
             return "Error: wiki writes are not enabled for this project. " +
                 "Ask the user to tick 'Allow the agent to create, update and delete wiki pages' " +
-                "in the Configure Tela Wiki dialog."
+                "in the Configure Integrations dialog (Tela wiki tab)."
         }
 
         // Resolve space: explicit id → explicit name → first space.
-        val spaceId = VfsTools.str(args, "space")?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { it.toLongOrNull()?.toString() ?: resolveSpaceByName(project, it) }
-            ?: firstSpaceId(project)
-            ?: return "Error: could not determine a wiki space to write into. " +
-                "Ask the user to check the token's access (tela: Settings → API Keys)."
+        // When a write root is configured, creating is pinned to the root's
+        // parent (and its space), overriding whatever the model passed.
+        val rootId = state.writeRootId()
+        if (rootId.isNotEmpty()) {
+            val requestedSpaceId = VfsTools.str(args, "space")?.trim()?.takeIf { it.isNotEmpty() }
+                ?.let { it.toLongOrNull()?.toString() ?: resolveSpaceByName(project, it) }
+            val rootSpaceId = state.writeRootSpaceId()
+            if (requestedSpaceId != null && rootSpaceId.isNotEmpty() && requestedSpaceId != rootSpaceId) {
+                return "Error: writes are confined to the configured write root (page $rootId, " +
+                    "space $rootSpaceId) — the requested space ($requestedSpaceId) is a different one. " +
+                    "Ask the user to do this write themselves or to widen the write root."
+            }
+        }
+        val spaceId = if (rootId.isNotEmpty() && state.writeRootSpaceId().isNotEmpty()) {
+            state.writeRootSpaceId()
+        } else {
+            VfsTools.str(args, "space")?.trim()?.takeIf { it.isNotEmpty() }
+                ?.let { it.toLongOrNull()?.toString() ?: resolveSpaceByName(project, it) }
+                ?: firstSpaceId(project)
+                ?: return "Error: could not determine a wiki space to write into. " +
+                    "Ask the user to check the token's access (tela: Settings → API Keys)."
+        }
 
         // Update when a page with this title already exists in the space, else create.
         val existingId = findPageInSpace(project, spaceId, title)
         val action = if (existingId != null) WikiWriteAction.UPDATE else WikiWriteAction.CREATE
         if (action == WikiWriteAction.UPDATE) {
+            // Write-root gate: the page being replaced must sit under the root.
+            val rootId = state.writeRootId()
+            if (rootId.isNotEmpty() && !WriteRoot.isUnderTelaRoot(project, existingId!!, rootId)) {
+                return WriteRoot.outsideRootError("tela wiki", rootId, "page '$title' (id $existingId)")
+            }
             // Updating overwrites the whole page body — show it before sending.
             if (!approveWrite(project, action,
                     "TellForgeAI wants to REPLACE the body of wiki page '$title' (id $existingId):\n\n" +
@@ -171,7 +193,13 @@ object TelaWikiTool {
                 put("space_id", spaceId.toLong())
                 put("title", title)
                 put("body", body)
-                parentId(project, spaceId, VfsTools.str(args, "parent")?.trim())?.let { put("parent_id", it.toLong()) }
+                val rootId = state.writeRootId()
+                when {
+                    // Write root set → children of the root, always.
+                    rootId.isNotEmpty() -> put("parent_id", rootId.toLong())
+                    else -> parentId(project, spaceId, VfsTools.str(args, "parent")?.trim())
+                        ?.let { put("parent_id", it.toLong()) }
+                }
             }
             post(project, "/api/pages", payload).fold(
                 onSuccess = { resp ->
@@ -204,13 +232,13 @@ object TelaWikiTool {
 
         if (!state.configured(project)) {
             return "Error: no tela wiki is configured for this project. " +
-                "Ask the user to open 'Configure Tela Wiki…' (Wiki button in the tool window), " +
+                "Ask the user to open 'Configure Integrations…' (Integrations button in the tool window), " +
                 "paste an access token and press 'Test connection'."
         }
         if (!state.writeEnabled()) {
             return "Error: wiki writes are not enabled for this project. " +
                 "Ask the user to tick 'Allow the agent to create, update and delete wiki pages' " +
-                "in the Configure Tela Wiki dialog."
+                "in the Configure Integrations dialog (Tela wiki tab)."
         }
 
         val pageId = identifier.toLongOrNull()?.toString()
@@ -220,6 +248,22 @@ object TelaWikiTool {
         // Read the title first so the confirmation names what is deleted.
         val title = get(project, "/api/pages/$pageId").getOrNull()
             ?.get("page")?.jsonObject?.get("title")?.jsonPrimitive?.content ?: identifier
+
+        // Write-root gate BEFORE approval: deleting the root itself is always
+        // refused (a tela delete takes the whole subtree to trash); deleting
+        // anything outside the subtree is refused as out-of-scope.
+        val rootId = TellForgeAIWikiState.getInstance(project).writeRootId()
+        if (rootId.isNotEmpty()) {
+            if (pageId == rootId) {
+                return "Error: delete refused — the target is the write root itself " +
+                    "(id $rootId); deleting it would take its whole subtree to trash. " +
+                    "Ask the user to delete it manually if that is really intended."
+            }
+            if (!WriteRoot.isUnderTelaRoot(project, pageId, rootId)) {
+                return WriteRoot.outsideRootError("tela wiki", rootId, "page $pageId")
+            }
+        }
+
         if (!approveWrite(project, WikiWriteAction.DELETE,
                 "TellForgeAI wants to DELETE wiki page '$title' (id $pageId).\n\nAllow?",
             )
@@ -269,7 +313,7 @@ object TelaWikiTool {
 
     // ------------------------------------------------------------ diagnostics
 
-    /** Used by the Configure Tela Wiki dialog: verifies URL + token, reports scope/spaces. */
+    /** Used by the Configure Integrations dialog: verifies URL + token, reports scope/spaces. */
     fun testConnection(baseUrl: String, token: String): String {
         if (baseUrl.isEmpty()) return "⚠ Enter a wiki URL first."
         if (token.isBlank()) return "⚠ Enter an access token (tela: Settings → API Keys)."
@@ -311,13 +355,14 @@ object TelaWikiTool {
 
     // ------------------------------------------------------------------ HTTP
 
-    private class ApiException(val code: String?, message: String) : RuntimeException(message)
+    internal class ApiException(val code: String?, @Suppress("unused") message: String) : RuntimeException(message)
 
-    private fun describe(e: Throwable): String {
+    internal fun describe(e: Throwable): String {
         if (e is ApiException) {
             return when (e.code) {
                 "unauthorized" -> "token rejected (401 unauthorized) — check the token in the Configure Tela Wiki dialog"
                 "forbidden" -> "not allowed (403 forbidden) — the token needs the write scope and editor role on the space"
+                "forbidden_public" -> "published page only (403 forbidden_public) — your token is not a member of that space"
                 "not_found" -> "not found (404)"
                 "quota_exceeded" -> "quota exceeded"
                 "rate_limited" -> "rate limited — try again shortly"
@@ -343,6 +388,12 @@ object TelaWikiTool {
 
     private fun get(project: Project, path: String) =
         requestJson(baseUrl(project) + path, tokenOrThrow(project), "GET", null)
+
+    /**
+     * Package-visible GET for [WriteRoot]'s ancestry walk / verification —
+     * same request as [get], just callable outside this object.
+     */
+    internal fun getRaw(project: Project, path: String) = get(project, path)
 
     private fun post(project: Project, path: String, payload: JsonObject) =
         requestJson(baseUrl(project) + path, tokenOrThrow(project), "POST", payload)

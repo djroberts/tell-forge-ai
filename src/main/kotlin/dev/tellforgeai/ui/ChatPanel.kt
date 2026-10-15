@@ -323,9 +323,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             ShowSettingsUtil.getInstance()
                 .showSettingsDialog(project, TellForgeAIConfigurable::class.java) { refreshProfiles() }
         }
-        val wikiButton = JButton("Wiki").apply { toolTipText = "Configure Tela Wiki for this project" }
-        wikiButton.addActionListener {
-            dev.tellforgeai.ui.ConfigureWikiDialog.show(project)
+        val integrationsButton = JButton("Integrations").apply {
+            toolTipText = "Configure project integrations (Tela wiki, Notion, AI instructions)"
+        }
+        integrationsButton.addActionListener {
+            dev.tellforgeai.ui.ConfigureIntegrationsDialog.show(project)
         }
         testButton.toolTipText = "Test the selected provider connection (/models)"
         testButton.addActionListener { onTestConnection() }
@@ -338,7 +340,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             add(profileCombo, BorderLayout.CENTER)
             val right = JPanel().apply {
                 isOpaque = false
-                add(newChatButton); add(testButton); add(wikiButton); add(settingsButton)
+                add(newChatButton); add(testButton); add(integrationsButton); add(settingsButton)
             }
             add(right, BorderLayout.EAST)
         }
@@ -1038,7 +1040,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         // system prompt (with project context) is supplied fresh each request
         val context = buildProjectContext()
-        val system = ChatMessage.system(Prompts.system(mode == Mode.PLAN, context))
+        val instructions = instructionsLayer(project)
+        val system = ChatMessage.system(Prompts.system(mode == Mode.PLAN, context, instructions))
         val chatIdForCompaction = currentChatId
         val window = contextWindow(profile)
         val boundary = if (!compactionInProgress && !compactionFailedForCurrentTurn && window != null &&
@@ -1210,11 +1213,21 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                         onDownloadRequested = { request ->
                             requestApproval("TellForgeAI wants to download a binary file:\n\n$request\n\nAllow?", "Download binary")
                         },
-                    ) { command ->
-                        // If the user disabled the approval prompt, run without asking.
-                        if (!askPermissionCheckBox.isSelected) return@execute true
-                        requestApproval("TellForgeAI wants to run this command:\n\n$command\n\nAllow?", "Run command")
-                    }
+                        onCommandRequested = { command ->
+                            // If the user disabled the approval prompt, run without asking.
+                            if (!askPermissionCheckBox.isSelected) true
+                            else requestApproval("TellForgeAI wants to run this command:\n\n$command\n\nAllow?", "Run command")
+                        },
+                        // Always-on gate for instructions-repo commits+pushes: pushing
+                        // broadcasts the change to everyone sharing the repo, so the
+                        // diff is shown even when command approval is disabled.
+                        onCommitRequested = { diff ->
+                            requestApproval(
+                                "TellForgeAI wants to commit and push this change to the instructions repo:\n\n$diff",
+                                "Push instructions change",
+                            )
+                        },
+                    )
                     call to result
                 }
                 ApplicationManager.getApplication().invokeLater {
@@ -1290,6 +1303,27 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         } catch (e: Exception) {
             cachedContext
         }
+    }
+
+    /**
+     * Instructions layer from the configured instructions repo, or "".
+     * Cached in memory (never git on this path); triggers an async refresh.
+     */
+    private fun instructionsLayer(project: Project): String {
+        val state = dev.tellforgeai.settings.InstructionsRepoState.getInstance(project)
+        if (!state.enabled()) return ""
+        val service = dev.tellforgeai.llm.InstructionsRepoService.getInstance(project)
+        val text = service.instructions()
+        if (text.isEmpty()) {
+            // First use this session: kick off a background clone/refresh.
+            com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+                try {
+                    dev.tellforgeai.llm.InstructionsRepoService.getInstance(project).ensureFresh()
+                } catch (_: Exception) {
+                }
+            }
+        }
+        return text
     }
 
     // --- tool transcript rendering ---

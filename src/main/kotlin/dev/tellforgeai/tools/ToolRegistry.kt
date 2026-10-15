@@ -18,7 +18,7 @@ object ToolRegistry {
      * Tool specs sent to the model. [planMode] restricts the command tool.
      * [project] (nullable for tests) gates the wiki/Notion tools: their specs
      * are only offered when the corresponding per-project integration is
-     * enabled in the Configure Tela Wiki dialog.
+     * enabled in the Configure Integrations dialog.
      */
     fun specs(project: Project?, planMode: Boolean): List<Map<String, Any>> {
         val wikiEnabled = project != null &&
@@ -27,6 +27,10 @@ object ToolRegistry {
         val notionEnabled = project != null &&
             dev.tellforgeai.settings.NotionState.getInstance(project).enabled() &&
             dev.tellforgeai.settings.NotionState.getInstance(project).configured(project)
+        val instructionsEnabled = project != null &&
+            dev.tellforgeai.settings.InstructionsRepoState.getInstance(project).enabled()
+        val instructionsWriteEnabled = project != null &&
+            dev.tellforgeai.settings.InstructionsRepoState.getInstance(project).writeEnabled()
         return listOfNotNull(
         spec(
             "list_files",
@@ -104,8 +108,8 @@ object ToolRegistry {
         ),
         if (wikiEnabled) spec(
             "wiki_search",
-            "Keyword-search the project's tela wiki (configured via 'Configure Tela Wiki…' " +
-                "in the tool window gear menu). Read-only, both modes, no approval. " +
+            "Keyword-search the project's tela wiki (configured via 'Configure Integrations…', " +
+                "Tela wiki tab). Read-only, both modes, no approval. " +
                 "If no wiki is configured the call fails — do not retry; say so and move on.",
             jsonObjectProps(
                 "query" to "Search query; short and specific works best.",
@@ -125,9 +129,11 @@ object ToolRegistry {
             "wiki_write_page",
             "Create a new page in the project's tela wiki, OR replace the body of an existing " +
                 "page with the same title in the target space (confirmation per the user's " +
-                "'Ask permission' settings). Forge mode only. Do not call this repeatedly for " +
-                "the same title — prefer one well-formed page; to extend an existing page tell " +
-                "the user and include the full new body in one call.",
+                "'Ask permission' settings). When the user configured a write root, creates are " +
+                "pinned as children of that root and updates outside its subtree are refused. " +
+                "Forge mode only. Do not call this repeatedly for the same title — prefer one " +
+                "well-formed page; to extend an existing page tell the user and include the " +
+                "full new body in one call.",
             jsonObjectProps(
                 "title" to "Page title.",
                 "content" to "Page body in markdown.",
@@ -147,10 +153,32 @@ object ToolRegistry {
             required = listOf("page"),
         ) else null,
         // Notion tools, gated by the per-project Notion integration.
+        if (instructionsEnabled) spec(
+            "instructions_read",
+            "Read the AI instructions markdown from the user-maintained configuration repo " +
+                "(configured via 'Configure Instructions Repo…', Config button). Returns the raw " +
+                "file(s) as stored — call this before editing so you see original section markers. " +
+                "Read-only, both modes, no approval.",
+            jsonObjectProps(),
+            required = listOf(),
+        ) else null,
+        if (instructionsEnabled && !planMode) spec(
+            "instructions_write",
+            "Edit the AI instructions repo: write [content] to [path] (relative to the repo's " +
+                "instructions folder), show the user a diff, and after approval commit and push. " +
+                "Forge mode only and requires the user's write opt-in — does NOT edit project files. " +
+                "Read the file with instructions_read first; keep edits focused.",
+            jsonObjectProps(
+                "path" to "Markdown file path inside the instructions folder, e.g. 'AGENTS.md'.",
+                "content" to "The complete new file content.",
+                "message" to "Optional commit message (Conventional Commit style).",
+            ),
+            required = listOf("path", "content"),
+        ) else null,
         if (notionEnabled) spec(
             "notion_search",
             "Keyword-search the user's Notion workspace for pages the integration can access " +
-                "(configured via the Notion tab of 'Configure Tela Wiki…'). Read-only, both " +
+                "(configured via the Notion tab of 'Configure Integrations…'). Read-only, both " +
                 "modes, no approval. Returns page ids/titles; use notion_read_page to read one.",
             jsonObjectProps(
                 "query" to "Search query; short and specific works best. Empty lists all accessible pages.",
@@ -170,9 +198,11 @@ object ToolRegistry {
         if (notionEnabled && !planMode) spec(
             "notion_write_page",
             "Create a new Notion page under an existing parent page (markdown body flattened " +
-                "to Notion paragraph/heading/list/code blocks). Forge mode only. Requires the " +
-                "user to have enabled Notion writes in the 'Configure Tela Wiki…' dialog, and " +
-                "each write asks for approval. Do not call this repeatedly for the same title.",
+                "to Notion paragraph/heading/list/code blocks). When the user configured a " +
+                "write root, the parent is pinned to that root (a database root makes the " +
+                "page a row) and parents outside its subtree are refused. Forge mode only. " +
+                "Requires the user to have enabled Notion writes, and each write asks for " +
+                "approval. Do not call this repeatedly for the same title.",
             jsonObjectProps(
                 "title" to "New page title.",
                 "content" to "Page body in markdown (headings, bullets, code fences; 100 blocks max).",
@@ -253,12 +283,25 @@ object ToolRegistry {
             "notion_query_database",
             "Query a Notion database and list its rows (the reader cannot flatten databases). " +
                 "Read-only, both modes, no approval. Optional filter/sorts are raw JSON " +
-                "(https://developers.notion.com/reference/post-database-query-filter).",
+                "(https://developers.notion.com/reference/post-database-query-filter). " +
+                "Call notion_describe_database FIRST to get exact property names/types/options " +
+                "instead of guessing.",
             jsonObjectProps(
                 "database" to "Database id, or id/title from notion_search results marked [database].",
                 "filter" to "Optional Notion filter JSON object, e.g. {\"property\":\"Status\",\"select\":{\"equals\":\"Done\"}}.",
                 "sorts" to "Optional Notion sorts JSON array, e.g. [{\"property\":\"Name\",\"direction\":\"ascending\"}].",
                 "limit" to "Optional max rows (1-100, default 20).",
+            ),
+            required = listOf("database"),
+        ) else null,
+        if (notionEnabled) spec(
+            "notion_describe_database",
+            "Describe a Notion database's schema: property names, types and select/status/ " +
+                "multi-select options (GET /v1/databases/{id}). Read-only, both modes, no " +
+                "approval. Call it before notion_query_database filter/sorts, or whenever a " +
+                "filter fails with validation_error.",
+            jsonObjectProps(
+                "database" to "Database id, or id/title from notion_search results marked [database].",
             ),
             required = listOf("database"),
         ) else null,
@@ -338,6 +381,7 @@ object ToolRegistry {
         planMode: Boolean,
         onDownloadRequested: ((String) -> Boolean)? = null,
         onCommandRequested: (String) -> Boolean,
+        onCommitRequested: (String) -> Boolean = onCommandRequested,
     ): String = try {
         val args: JsonObject = if (argumentsJson.isBlank()) JsonObject(emptyMap())
         else Json.parseToJsonElement(argumentsJson).jsonObject
@@ -401,6 +445,21 @@ object ToolRegistry {
             }
             "notion_query_database" -> if (!notionAllowed(project)) notEnabled("notion_query_database")
                 else NotionTool.queryDatabase(project, args)
+            "notion_describe_database" -> if (!notionAllowed(project)) notEnabled("notion_describe_database")
+                else NotionTool.describeDatabase(project, args)
+            "instructions_read" -> if (!instructionsAllowed(project)) notEnabled("instructions_read")
+                else dev.tellforgeai.tools.InstructionsTool.read(project, args)
+            "instructions_write" -> when {
+                planMode -> notAllowedInPlan(name)
+                !instructionsAllowed(project) -> notEnabled(name)
+                !dev.tellforgeai.settings.InstructionsRepoState.getInstance(project).writeEnabled() ->
+                    "Error: 'instructions_write' requires the user's write opt-in in the " +
+                        "'Configure Instructions Repo' dialog (Config button in the tool window)."
+                else -> dev.tellforgeai.tools.InstructionsTool.write(
+                    project, args,
+                    onCommitRequested = onCommitRequested,
+                )
+            }
             "run_command" -> CommandTool.run(project, args, planMode, onCommandRequested)
             "download_binary" -> if (planMode) notAllowedInPlan(name)
                 else DownloadBinaryTool.download(project, args, onDownloadRequested ?: { false })
@@ -426,6 +485,10 @@ object ToolRegistry {
         val s = dev.tellforgeai.settings.NotionState.getInstance(project)
         return s.enabled() && s.configured(project)
     }
+
+    /** Stale-spec guard: the instructions tools must be enabled for this project. */
+    private fun instructionsAllowed(project: Project): Boolean =
+        dev.tellforgeai.settings.InstructionsRepoState.getInstance(project).enabled()
 
     private fun notEnabled(name: String): String =
         "Error: '$name' is disabled for this project. The user can enable it in the " +
