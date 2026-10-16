@@ -99,10 +99,16 @@ object ToolRegistry {
             "web_search",
             "Search the web for documentation, error messages, library APIs, or current " +
                 "information beyond your training data. Prefer official docs in the results. " +
-                "This is read-only and needs no user approval. If search fails or returns " +
-                "nothing, answer from your own knowledge and say so — do not retry repeatedly.",
+                "This is read-only and needs no user approval. The result's Provider: line " +
+                "says which backend served the query. If the results are empty, an error, " +
+                "or clearly don't answer the query, you may re-call this tool with " +
+                "'provider' set to the other backend (fallback); otherwise answer from " +
+                "your own knowledge and say so — do not retry repeatedly.",
             jsonObjectProps(
                 "query" to "Search query (keep it short and specific).",
+                "provider" to ("Optional backend: 'brave' or 'duckduckgo'. Omit for the " +
+                    "configured primary; pass the OTHER provider when results were " +
+                    "unsatisfactory (LLM-initiated fallback)."),
             ),
             required = listOf("query"),
         ),

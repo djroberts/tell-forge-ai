@@ -30,6 +30,13 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
         var commandTimeoutSeconds: Int = 30
         /** Web-search backend: "duckduckgo" (keyless) or "brave" (needs API key). */
         var webSearchProvider: String = "duckduckgo"
+        /**
+         * Two-layer fallback: on a hard failure of the primary provider (error,
+         * no key, empty results) the other provider is tried automatically, and
+         * the model is allowed to re-call web_search with the other provider
+         * when it judges the results unsatisfactory.
+         */
+        var webSearchFallback: Boolean = true
         /** Explicit opt-in: use the selected LLM for a billable model-pricing lookup. */
         var aiPricingLookupEnabled: Boolean = false
         /**
@@ -103,6 +110,12 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
 
     fun setWebSearchProvider(value: String) {
         state.webSearchProvider = value
+    }
+
+    fun webSearchFallbackEnabled(): Boolean = state.webSearchFallback
+
+    fun setWebSearchFallback(value: Boolean) {
+        state.webSearchFallback = value
     }
 
     fun aiPricingLookupEnabled(): Boolean = state.aiPricingLookupEnabled

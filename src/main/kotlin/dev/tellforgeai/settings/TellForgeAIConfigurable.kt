@@ -34,6 +34,9 @@ class TellForgeAIConfigurable : Configurable {
     private val webSearchProviderCombo = JComboBox(arrayOf("brave", "duckduckgo"))
     /** Longest-side cap for pasted images: 256/512/1024/2048/Original. */
     private val pastedImageSizeCombo = JComboBox(arrayOf("256", "512", "1024", "2048", "Original"))
+    /** Allow the other provider on hard failure (code) or on LLM retry. */
+    private val webSearchFallbackCheckBox =
+        JCheckBox("Fallback to the other provider when the primary fails (code) or the model finds results unsatisfactory (LLM may re-call web_search with the other provider)")
     private val braveKeyField = JPasswordField()
     private val aiPricingLookupCheckBox = JCheckBox("Use the selected LLM for a billable pricing lookup (cached for 24 hours)")
     /** API protocol selector (OpenAI-compatible / OpenAI Responses / Gemini preset). */
@@ -119,6 +122,7 @@ class TellForgeAIConfigurable : Configurable {
             braveKeyField.isEnabled = webSearchProviderCombo.selectedItem == "brave"
         }
         pastedImageSizeCombo.addActionListener { if (!suppressFieldListeners) modified = true }
+        webSearchFallbackCheckBox.addActionListener { if (!suppressFieldListeners) modified = true }
         aiPricingLookupCheckBox.addActionListener { if (!suppressFieldListeners) modified = true }
         // API protocol: switching swaps the base-url default and toggles the
         // OpenRouter-specific options panel but never discards the user's URL.
@@ -274,6 +278,7 @@ class TellForgeAIConfigurable : Configurable {
         center.add(JLabel(" "))
         center.add(labeled("Command timeout in seconds (5–600, applies to terminal tool; global)", timeoutField))
         center.add(labeled("Web search provider (duckduckgo = keyless; brave = requires API key; global)", webSearchProviderCombo))
+        center.add(webSearchFallbackCheckBox)
         center.add(labeled("Brave Search API key (only used when provider is brave; stored in PasswordSafe; global)", braveKeyField))
         center.add(aiPricingLookupCheckBox)
         center.add(labeled("Max pasted image size in px (longest side; Original = no resize; global)", pastedImageSizeCombo))
@@ -300,6 +305,7 @@ class TellForgeAIConfigurable : Configurable {
         webSearchProviderCombo.selectedItem = if (provider == "brave") "brave" else "duckduckgo"
         braveKeyField.text = ApiKeyStore.get(ApiKeyStore.BRAVE_KEY_ID).orEmpty()
         braveKeyField.isEnabled = provider == "brave"
+        webSearchFallbackCheckBox.isSelected = s.webSearchFallbackEnabled()
         aiPricingLookupCheckBox.isSelected = s.aiPricingLookupEnabled()
         pastedImageSizeCombo.selectedItem =
             s.pastedImageMaxSize().takeIf { it > 0 }?.toString() ?: "Original"
@@ -636,6 +642,7 @@ class TellForgeAIConfigurable : Configurable {
         settings.setWebSearchProvider(
             (webSearchProviderCombo.selectedItem as? String) ?: "duckduckgo"
         )
+        settings.setWebSearchFallback(webSearchFallbackCheckBox.isSelected)
         settings.setAiPricingLookupEnabled(aiPricingLookupCheckBox.isSelected)
         settings.setPastedImageMaxSize(
             when (val sel = pastedImageSizeCombo.selectedItem as? String) {

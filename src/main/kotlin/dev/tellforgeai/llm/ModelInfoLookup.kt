@@ -127,14 +127,22 @@ object ModelInfoLookup {
         }, "TellForgeAI-model-info").apply { isDaemon = true; start() }
     }
 
-    /** Returns results plus a human-readable error when the search itself failed. */
+    /**
+     * Primary provider per settings; on hard failure (error / empty / missing
+     * key) the other provider is retried when fallback is enabled — same
+     * two-layer policy as WebSearchTool minus the LLM layer (this path is
+     * not agent-driven).
+     */
     private fun search(query: String, step: (String) -> Unit): Pair<List<Result>, String?> {
-        val preferBrave = TellForgeAISettings.getInstance().webSearchProvider().lowercase() == "brave"
-        val first = if (preferBrave) searchBrave(query, step) else searchDdg(query, step)
-        val second = if (preferBrave) searchDdg(query, step) else searchBrave(query, step)
-        val (resultsA, errorA) = first ?: (null to null)
-        val (resultsB, errorB) = second ?: (null to null)
-        return ((resultsA.orEmpty() + resultsB.orEmpty()) as List<Result>) to (errorA ?: errorB)
+        val settings = TellForgeAISettings.getInstance()
+        val preferBrave = settings.webSearchProvider().lowercase() == "brave"
+        val primary = if (preferBrave) searchBrave(query, step) else searchDdg(query, step)
+        val secondary = if (preferBrave) searchDdg(query, step) else searchBrave(query, step)
+        val (resA, errA) = primary ?: (null to null)
+        val fallbackEnabled = settings.webSearchFallbackEnabled()
+        val useFallback = fallbackEnabled && (resA.isNullOrEmpty() || errA != null)
+        val (resB, errB) = if (useFallback) (secondary ?: (null to null)) else (emptyList<Result>() to null)
+        return ((resA.orEmpty() + resB) as List<Result>) to (errA ?: errB)
     }
 
     /** Extracts the bare host for site-scoped queries: "https://hostyourai.com/api/v1" → "hostyourai.com". */
