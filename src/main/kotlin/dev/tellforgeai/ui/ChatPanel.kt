@@ -144,6 +144,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                         if (chatId == currentChatId) {
                             finishAssistantBlock()
                             setStreaming(false)
+                            turnEndedLive = true
+                            repaintTranscript()
                         }
                         refreshChatList()
                         if (!stopped && chatId == currentChatId) updateStickyHeader()
@@ -174,6 +176,14 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var lastAssistantMarkdown = StringBuilder()
     /** Streaming reasoning/thinking text (transient — cleared once the answer starts). */
     private var lastReasoning = StringBuilder()
+    /**
+     * Set on a live turn end (onTurnEnded) and cleared when the transcript is
+     * rebuilt (openChat/newChat). Gates the tail pane's end-of-turn marker:
+     * without it the tail still renders "✓ Planning complete" even after the
+     * marker block is rendered there again as a finished block — the line
+     * appears twice.
+     */
+    private var turnEndedLive = false
     private var currentChatId: String? = null
     private var thinkingDots = 0
     /** Last time the transcript was re-rendered (throttle for per-token streaming). */
@@ -920,6 +930,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             }
             if (marker.isNotEmpty()) finishedBlocks.add(marker)
         }
+        turnEndedLive = false
         rebuildTranscript()
         (profileCombo.selectedItem as? ProviderProfile)?.let { ensureModelInfo(it) }
         updateStickyHeader()
@@ -990,6 +1001,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         lastAssistantMarkdown = StringBuilder()
         lastReasoning = StringBuilder()
         streamingHeader = ""
+        turnEndedLive = false
         chatList.clearSelection()
         rebuildTranscript()
         inputArea.text = ""
@@ -1556,6 +1568,12 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             thinkingTimer.start()
         } else {
             thinkingTimer.stop()
+            // Re-render the tail NOW: finishAssistantBlock() ran (and repainted)
+            // while `streaming` was still true, so its last pass left the stale
+            // "Thinking…" line in the tail pane — and without this repaint the
+            // "✓ Task complete" / "Stopped." marker never appears after the
+            // final answer.
+            repaintTranscript()
             refreshChatList()
         }
     }
@@ -1693,7 +1711,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         // marker ("✓ Task complete" survives reopening and IDE restarts).
         currentChatId?.let {
             TellForgeAIChatsState.getInstance(project).get(it)?.lastTurnStatus
-        }.takeIf { !it.isNullOrBlank() } != null ->
+        }.takeIf { !it.isNullOrBlank() } != null && turnEndedLive ->
             endOfTurnLine()
         else -> ""
     }

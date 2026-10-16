@@ -4,6 +4,12 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.1] - 2026-10-30
+
+### Fixed
+- The end-of-turn marker ("✓ Planning complete" / "✓ Task complete") no longer appears twice: it was rendered both as a finished transcript block on reopen and again in the live tail pane whenever the chat's persisted last-turn status was non-blank
+- A finished turn could keep showing the stale "Thinking…" status in the tail pane and never display its end-of-turn marker when the final answer ended without one (e.g. a question), because the state transition to not-streaming happened without re-rendering the tail (ui)
+
 ## [0.11.0] - 2026-10-30
 
 ### Added
