@@ -24,6 +24,12 @@ class TellForgeAIChatsState : PersistentStateComponent<TellForgeAIChatsState.Sta
 
     override fun loadState(state: State) {
         this.state = state
+        prune()
+    }
+
+    private fun prune() {
+        val cutoff = System.currentTimeMillis() - RETENTION_MILLIS
+        state.chats.removeAll { it.updatedAt < cutoff }
     }
 
     /** All chats, most recently updated first. */
@@ -34,6 +40,7 @@ class TellForgeAIChatsState : PersistentStateComponent<TellForgeAIChatsState.Sta
     fun upsert(chat: ChatSession) {
         val idx = state.chats.indexOfFirst { it.id == chat.id }
         if (idx >= 0) state.chats[idx] = chat else state.chats.add(chat)
+        prune()
     }
 
     fun delete(id: String) {
@@ -41,6 +48,12 @@ class TellForgeAIChatsState : PersistentStateComponent<TellForgeAIChatsState.Sta
     }
 
     companion object {
+        /**
+         * Retention window: chat sessions whose [ChatSession.updatedAt] is
+         * older than this are deleted. Always enforced; not user-configurable.
+         */
+        private const val RETENTION_MILLIS = 30L * 24 * 60 * 60 * 1000
+
         @JvmStatic
         fun getInstance(project: Project): TellForgeAIChatsState =
             project.getService(TellForgeAIChatsState::class.java)

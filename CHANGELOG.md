@@ -4,6 +4,16 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.0] - 2026-10-31
+
+### Added
+- Automatic chat retention: per-project chat sessions untouched for 30 days are deleted on project open and at each chat save, so tellforgeai.chats.xml no longer grows without bounds (chats)
+
+## [0.12.0] - 2026-10-30
+
+### Added
+- Two-layer web-search fallback: when the primary provider (DuckDuckGo or Brave) hard-fails, the other provider is retried automatically, and the model may re-call web_search with an explicit `provider` argument when it judges results unsatisfactory; can be turned off in settings (tools)
+
 ## [0.11.1] - 2026-10-30
 
 ### Fixed
