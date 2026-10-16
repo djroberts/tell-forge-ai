@@ -73,6 +73,16 @@ class InstructionsRepoService(private val project: Project) {
     /** The merged instructions for the system prompt (memory read, never git). */
     fun instructions(): String = snapshot.get().text
 
+    /** One-line status; hides file-count/repo detail from the tool surface. */
+    fun toolStatus(): String {
+        val s = snapshot.get()
+        return when {
+            s.error.isNotEmpty() && s.text.isEmpty() -> "error: ${s.error}"
+            s.fromCache -> "cached (offline)"
+            else -> "saved ${age(s.syncedAt)}"
+        }
+    }
+
     /** One-line status for the UI, e.g. "synced 2 min ago (3 files)". */
     fun status(): String {
         val s = snapshot.get()
@@ -366,9 +376,16 @@ class InstructionsRepoService(private val project: Project) {
             snapshot.set(Snapshot(snapshot.get().text, snapshot.get().fileCount, snapshot.get().syncedAt, true, err))
             return snapshot.get()
         }
-        val text = files.joinToString("\n\n") { f ->
-            "### ${f.relativeTo(dir).invariantSeparatorsPath}\n" +
-                f.readText(StandardCharsets.UTF_8).trimEnd()
+        // With a single file (the normal case) the text is returned without a
+        // per-file header, so the model-facing instructions never reveal the
+        // repo/filename layout. Multi-file repos keep the headers for context.
+        val text = if (files.size == 1) {
+            files.single().readText(StandardCharsets.UTF_8).trimEnd()
+        } else {
+            files.joinToString("\n\n") { f ->
+                "### ${f.relativeTo(dir).invariantSeparatorsPath}\n" +
+                    f.readText(StandardCharsets.UTF_8).trimEnd()
+            }
         }
         val snap = Snapshot(text, files.size, System.currentTimeMillis(), false, "")
         snapshot.set(snap)
@@ -463,6 +480,7 @@ class InstructionsRepoService(private val project: Project) {
      * be when a subpath is configured.
      */
     fun previewChange(relPath: String, content: String): String? {
+        requireCanonical(relPath) ?: return null
         val spec = state().spec() ?: return null
         val dir = cloneDir(spec, branch())
         try {
@@ -494,6 +512,7 @@ class InstructionsRepoService(private val project: Project) {
      * declines the commit/push (keeps the clone clean for the next refresh).
      */
     fun discardChange(relPath: String) {
+        requireCanonical(relPath) ?: return
         val spec = state().spec() ?: return
         val dir = cloneDir(spec, branch())
         val root = contentRoot(dir) ?: dir
@@ -514,6 +533,9 @@ class InstructionsRepoService(private val project: Project) {
      * retries the push once; never force-pushes.
      */
     fun commitAndPush(relPath: String, message: String): String {
+        requireCanonical(relPath) ?: throw IllegalStateException(
+            "only the canonical instructions file may be modified"
+        )
         val spec = state().spec() ?: throw IllegalStateException("instructions repo not configured")
         val dir = cloneDir(spec, branch())
         val repoRel = if (spec.subpath.isBlank()) relPath.trimStart('/', '\\')
@@ -535,6 +557,17 @@ class InstructionsRepoService(private val project: Project) {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    /**
+     * Hard guard: the mutating API accepts only the canonical file. This is
+     * the tooling-level enforcement of "the instructions are one document" —
+     * no caller (agent, UI, future tool) can write a second file here.
+     * Returns null when [relPath] is not the canonical file.
+     */
+    private fun requireCanonical(relPath: String): String? {
+        val clean = relPath.trim().trimStart('/', '\\')
+        return if (clean.equals(CANONICAL_FILE, ignoreCase = true)) clean else null
+    }
 
     private fun state(): InstructionsRepoState = InstructionsRepoState.getInstance(project)
 
@@ -695,8 +728,22 @@ class InstructionsRepoService(private val project: Project) {
         /** Content seeded into a brand-new empty instructions repo. */
         fun startInstructionsFile(): String = """# Project AI Instructions
 
-TellForgeAI (and any other agent pointed at this repo) reads this file into
-its system prompt. Edit freely — everything here is versioned and pushable.
+These instructions are injected into the AI assistant's system prompt.
+They are one single document — do not create additional files beside this
+one; everything worth persisting lives here.
+
+## Changelog and release versions
+
+- Keep a `CHANGELOG.md` (Keep a Changelog format) at the repo root.
+- Every commit that ships user-facing changes (feat:, fix:) adds one bullet
+  under `## [Unreleased]` (### Added / Changed / Fixed / Removed) in the
+  same commit, written from the user's perspective.
+- The agent NEVER chooses the version number or release date, and never
+  converts `## [Unreleased]` into a dated `## [X.Y.Z]` heading. The user
+  curates release notes and picks the version themselves; only the user's
+  explicit edit of CHANGELOG.md starts a release.
+- "update the changelog" means: write/refresh bullets under
+  `## [Unreleased]` only.
 
 ## Guidelines
 

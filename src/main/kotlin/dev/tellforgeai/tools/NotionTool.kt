@@ -112,6 +112,8 @@ object NotionTool {
                         if (!url.isNullOrBlank()) append("  ").append(url)
                     }
                     append("\n\nUse notion_read_page (pages) or notion_query_database (databases) with the id.")
+                    append("\nBefore creating pages, check this list for existing ones — prefer ")
+                    append("notion_append_blocks / notion_update_block over creating duplicates.")
                 }.let { truncate(it) }
             },
             onFailure = { e -> "Error: notion_search failed — ${describe(e)}" },
@@ -206,6 +208,20 @@ object NotionTool {
                     "Use notion_search to find an exact title."
         } ?: return "Error: Notion requires a parent page. Ask the user to name a parent " +
             "(or search for one with notion_search and pass its id)."
+
+        // Duplicate guard: refuse to create when an accessible page already
+        // has this exact (or near-duplicate) title. Duplicate-page sprawl is
+        // the classic LLM failure mode; the model self-corrects on the next
+        // turn by appending/updating instead.
+        (
+            findExistingByTitle(project, title)?.let { id -> id to title }
+                ?: nearDuplicatePage(project, title)?.let { t -> t.first to t.second }
+            )?.let { (id, existing) ->
+            return "Error: a Notion page titled '$existing' already exists (id $id). " +
+                "Do NOT create a duplicate (e.g. '$title', '$title 2', '$title notes') — " +
+                "update it instead with notion_append_blocks (add content) or " +
+                "notion_update_block (edit in place); read it first with notion_read_page."
+        }
 
         val payload = buildJsonObject {
             if (pinnedIsDatabase && parentId == rootId) {
@@ -398,7 +414,7 @@ object NotionTool {
             ?: return "Error: blockId required — a block id from notion_read_page " +
                 "(call it with include_block_ids=true; ids appear as (block_id: …))."
         val content = VfsTools.str(args, "content")
-            ?: throw IllegalArgumentException("content required (new text for the block)")
+            ?: throw IllegalArgumentException("content required (new text for the block, or any value when archive=true)")
         val archive = (args["archive"]?.jsonPrimitive?.content ?: "").equals("true", ignoreCase = true)
 
         // Write-root gate: the block's page must sit inside the root subtree.
@@ -498,6 +514,18 @@ object NotionTool {
         val filename = vf.name
         val contentType = guessMimeType(filename)
 
+        // Notion rejects some text-ish extensions (.asc, .log, .conf, …) with
+        // a validation error. If the bytes are actually text, upload under a
+        // Notion-friendly name instead: "foo.asc" → "foo_asc.txt". Extensions
+        // the API already accepts (.txt/.md/.json/…) are never renamed.
+        val acceptedExts = setOf("txt", "md", "markdown", "csv", "json", "yml", "yaml",
+            "xml", "html", "svg", "png", "jpg", "jpeg", "gif", "webp", "pdf", "zip")
+        val ext = filename.substringAfterLast('.', "").lowercase()
+        val effectiveFilename = if (ext !in acceptedExts && isPlainText(bytes)) {
+            textUploadFilename(filename)
+        } else filename
+        val uploadContentType = if (effectiveFilename != filename) "text/plain" else contentType
+
         // Write-root gate: attaching to a page outside the root subtree is
         // out of scope (the upload itself is harmless without a target page).
         if (page != null) {
@@ -526,8 +554,8 @@ object NotionTool {
         // 1. Create the pending upload.
         val created = request("POST", "$API/file_uploads", token, buildJsonObject {
             put("mode", "single_part")
-            put("filename", filename)
-            put("content_type", contentType)
+            put("filename", effectiveFilename)
+            put("content_type", uploadContentType)
         }.toString().toRequestBody("application/json".toMediaType()))
             .getOrElse { return "Error: notion_upload_file failed (create) — ${describe(it)}" }
         val uploadId = created["id"]?.jsonPrimitive?.content
@@ -535,10 +563,10 @@ object NotionTool {
         val uploadUrl = created["upload_url"]?.jsonPrimitive?.content
 
         // 2. Send the bytes (multipart, to upload_url for single_part mode).
-        val mime = contentType.toMediaType()
+        val mime = uploadContentType.toMediaType()
         val fileBody = okhttp3.MultipartBody.Builder()
             .setType(okhttp3.MultipartBody.FORM)
-            .addFormDataPart("file", filename, bytes.toRequestBody(mime))
+            .addFormDataPart("file", effectiveFilename, bytes.toRequestBody(mime))
             .build()
         val sent = request("POST", uploadUrl ?: "$API/file_uploads/$uploadId/send", token, fileBody)
             .getOrElse { return "Error: notion_upload_file failed (send) — ${describe(it)}" }
@@ -560,7 +588,12 @@ object NotionTool {
                 }))))
             })
             return attach.fold(
-                onSuccess = { "Uploaded '$path' (file_upload $finalId) and attached it to '$page'." },
+                onSuccess = {
+                    val renameNote = if (effectiveFilename != filename)
+                        " (uploaded as '$effectiveFilename' — Notion does not accept the original extension)"
+                    else ""
+                    "Uploaded '$path'$renameNote (file_upload $finalId) and attached it to '$page'."
+                },
                 onFailure = { e ->
                     "Uploaded '$path' (file_upload $finalId) but attaching to '$page' failed: " +
                         "${describe(e)}. The upload is valid for 1 hour — attach it manually " +
@@ -568,9 +601,219 @@ object NotionTool {
                 },
             )
         }
-        return "Uploaded '$path' to Notion (file_upload id $finalId). Attach it with " +
-            "notion_append_blocks using an image/file block with \"file_upload\": {\"id\": \"$finalId\"} " +
-            "(valid for 1 hour)."
+        return "Uploaded '$path' to Notion (file_upload id $finalId)" +
+            (if (effectiveFilename != filename) " as '$effectiveFilename' — Notion does not accept the original extension" else "") +
+            ". Attach it with notion_append_blocks using an image/file block with " +
+            "\"file_upload\": {\"id\": \"$finalId\"} (valid for 1 hour)."
+    }
+
+    // ------------------------------------------------ text-extension fallback
+
+    /**
+     * Notion's File Upload API rejects a set of text-ish extensions (asc, log,
+     * conf, ini, …) with a validation error even though the content is plain
+     * text. When that happens the working convention is to upload the same
+     * bytes under a .txt name, keeping the original extension visible as a
+     * suffix: "foo.asc" → "foo_asc.txt". Renaming only when [isPlainText]
+     * confirms the bytes really are text — a binary blob must never be
+     * relabeled .txt.
+     */
+    private fun textUploadFilename(name: String): String {
+        val dot = name.lastIndexOf('.')
+        return if (dot <= 0) "$name.txt" else name.substring(0, dot) + "_" + name.substring(dot + 1) + ".txt"
+    }
+
+    /** Heuristic text sniff: no NUL bytes and mostly printable/whitespace. */
+    private fun isPlainText(bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return false
+        val sample = bytes.take(8 * 1024)
+        if (sample.any { it == 0.toByte() }) return false
+        val printable = sample.count { it in 9..13 || it in 32..126 || it < 0 } // tab/LF/CR, ASCII, UTF-8 high bytes
+        return printable.toDouble() / sample.size > 0.95
+    }
+
+    /**
+     * "Moves" a Notion file/image block to another page. The Notion API has no
+     * block re-parenting for file blocks, so this is a copy-then-delete:
+     * download the signed file URL to a TEMP file (every OS has one via
+     * java.io.tmpdir; the file is explicitly deleted in a `finally` whenever
+     * this call ends, success or failure), upload it fresh via the File
+     * Upload API, attach it to the target page, and only then archive the
+     * original block — archive last so a mid-flight failure never loses the
+     * attachment.
+     */
+    fun moveFile(project: Project, args: JsonObject): String {
+        val gate = requireWriteEnabled(project)
+        if (gate != null) return gate
+
+        val blockIdRaw = VfsTools.str(args, "block_id")?.trim()
+            ?: throw IllegalArgumentException("block_id required (id of the file/image block to move)")
+        val page = VfsTools.str(args, "page")?.trim()
+            ?: throw IllegalArgumentException("page required (target page id or title)")
+        val caption = VfsTools.str(args, "caption")?.trim()
+
+        val blockId = WriteRoot.normalizeNotionId(blockIdRaw)
+
+        // Write-root gate: both source block and target page must sit inside
+        // the root subtree (moving out of it would defeat confinement).
+        val rootId = NotionState.getInstance(project).writeRootId()
+        if (rootId.isNotEmpty()) {
+            if (!WriteRoot.isUnderNotionRoot(project, blockId, rootId)) {
+                return WriteRoot.outsideRootError("Notion", rootId, "file block $blockId")
+            }
+            val pageId0 = if (looksLikeUuid(page)) page else resolveTitleToId(project, page)
+                ?: return "Error: no Notion page titled '$page'. Use notion_search to find the exact title."
+            if (!WriteRoot.isUnderNotionRoot(project, WriteRoot.normalizeNotionId(pageId0), rootId)) {
+                return WriteRoot.outsideRootError("Notion", rootId, "target page '$page'")
+            }
+        }
+
+        // 1. Read the source block: must be a file or image block with an
+        //    internal (Notion-hosted) URL; external URLs can just be
+        //    re-embedded on the target page losslessly, no temp needed.
+        val block = get(project, "/blocks/$blockId").getOrElse {
+            return "Error: could not read file block $blockId — ${describe(it)}"
+        }
+        val type = block["type"]?.jsonPrimitive?.content
+        if (type != "file" && type != "image") {
+            return "Error: block $blockId is a '$type' block, not a file/image block — " +
+                "only file attachment and image blocks can be moved. " +
+                "Use notion_read_page with include_block_ids=true to find block ids."
+        }
+        val fileObj = block[type]?.jsonObject
+        val fileUrl = fileObj?.get("file")?.jsonObject?.get("url")?.jsonPrimitive?.content
+        val externalUrl = fileObj?.get("external")?.jsonObject?.get("url")?.jsonPrimitive?.content
+
+        val targetPageId = if (looksLikeUuid(page)) WriteRoot.normalizeNotionId(page)
+        else WriteRoot.normalizeNotionId(resolveTitleToId(project, page)
+            ?: return "Error: no Notion page titled '$page'. Use notion_search to find the exact title.")
+
+        if (approve(project, WikiWriteAction.UPDATE, "Notion move file",
+                "TellForgeAI wants to move a '$type' file block (id $blockId) to page '$page' " +
+                    "(id $targetPageId). This re-uploads the file and archives the original block.\n\nAllow?",
+            ).not()
+        ) return "Notion move-file declined by the user."
+
+        val token = token(project)
+
+        // External URL: no bytes to move — embed the same URL on the target
+        // page and archive the source. Lossless, no temp file involved.
+        if (fileUrl == null && externalUrl != null) {
+            val attach = patch(project, "/blocks/$targetPageId/children", buildJsonObject {
+                put("children", JsonArray(listOf(block("file", buildJsonObject {
+                    put("type", "external")
+                    put("external", buildJsonObject {
+                        put("url", externalUrl)
+                        caption?.let { put("caption", richText(it)) }
+                    })
+                }))))
+            })
+            if (attach.isFailure) {
+                return "Error: attaching external file to '$page' failed — ${describe(attach.exceptionOrNull()!!)}"
+            }
+            archiveBlock(project, blockId)
+            return "Moved external file from block $blockId to '$page' (by re-embedding the URL)."
+        }
+        if (fileUrl == null) {
+            return "Error: block $blockId has no file URL — cannot move it."
+        }
+        val filename = fileObj?.get("name")?.jsonPrimitive?.content
+            ?: fileUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "file" }
+
+        // 2. Download to a TEMP file. Temp is deleted when this call ends,
+        //    success or failure; deleteOnExit covers a hard crash in between.
+        val temp = runCatching {
+            java.nio.file.Files.createTempFile("tellforgeai-notion-", "-" + filename.replace(Regex("[^A-Za-z0-9._-]"), "_"))
+                .also { it.toFile().deleteOnExit() }
+        }.getOrElse { e ->
+            return "Error: could not create a temp file (${System.getProperty("java.io.tmpdir")}) — ${e.message}"
+        }
+        try {
+            val bytes = runCatching {
+                client.newCall(Request.Builder().url(fileUrl).build()).execute().use { resp ->
+                    if (!resp.isSuccessful) throw ApiException("http_${resp.code}", "HTTP ${resp.code} downloading file")
+                    val b = (resp.body ?: throw ApiException(null, "empty response body")).bytes()
+                    if (b.size > 20 * 1024 * 1024) {
+                        throw ApiException("payload_too_large",
+                            "file is ${b.size / 1024 / 1024} MB; the API supports single-part uploads up to ~20 MB")
+                    }
+                    b
+                }
+            }.getOrElse { e ->
+                // Signed S3 URLs expire (~1 h) — a dead URL means the caller
+                // must re-fetch the block, not retry blind.
+                return if (e is ApiException && (e.code ?: "").startsWith("http_")) {
+                    "Error: downloading the file failed (${e.message}). The signed URL may have " +
+                        "expired — read the block again with notion_read_page (include_block_ids=true) " +
+                        "and retry with the fresh block id."
+                } else {
+                    "Error: downloading the file failed — ${describe(e)}"
+                }
+            }
+
+            // 3. Upload via the File Upload API (same flow as uploadFile).
+            // Same Notion-extension fallback: text bytes under an extension
+            // the API rejects are uploaded as "foo_asc.txt".
+            val acceptedExts = setOf("txt", "md", "markdown", "csv", "json", "yml", "yaml",
+                "xml", "html", "svg", "png", "jpg", "jpeg", "gif", "webp", "pdf", "zip")
+            val ext = filename.substringAfterLast('.', "").lowercase()
+            val uploadFilename = if (ext !in acceptedExts && isPlainText(bytes)) {
+                textUploadFilename(filename)
+            } else filename
+            val uploadContentType = if (uploadFilename != filename) "text/plain" else guessMimeType(filename)
+            val created = request("POST", "$API/file_uploads", token, buildJsonObject {
+                put("mode", "single_part")
+                put("filename", uploadFilename)
+                put("content_type", uploadContentType)
+            }.toString().toRequestBody("application/json".toMediaType()))
+                .getOrElse { return "Error: notion_move_file failed (create upload) — ${describe(it)}" }
+            val uploadId = created["id"]?.jsonPrimitive?.content
+                ?: return "Error: notion_move_file failed — no upload id in response."
+            val uploadUrl = created["upload_url"]?.jsonPrimitive?.content
+            val sent = request("POST", uploadUrl ?: "$API/file_uploads/$uploadId/send", token,
+                okhttp3.MultipartBody.Builder()
+                    .setType(okhttp3.MultipartBody.FORM)
+                    .addFormDataPart("file", uploadFilename, bytes.toRequestBody(uploadContentType.toMediaType()))
+                    .build())
+                .getOrElse { return "Error: notion_move_file failed (send) — ${describe(it)}" }
+            val finalId = sent["id"]?.jsonPrimitive?.content ?: uploadId
+
+            // 4. Attach to the target page.
+            val blockType = if (uploadContentType.startsWith("image/")) "image" else "file"
+            val attach = patch(project, "/blocks/$targetPageId/children", buildJsonObject {
+                put("children", JsonArray(listOf(block(blockType, buildJsonObject {
+                    put("type", "file_upload")
+                    put("file_upload", buildJsonObject {
+                        put("id", finalId)
+                        caption?.let { put("caption", richText(it)) }
+                    })
+                }))))
+            })
+            if (attach.isFailure) {
+                return "Moved block $blockId as far as the upload (file_upload $finalId, valid 1 hour) " +
+                    "but attaching to '$page' failed — ${describe(attach.exceptionOrNull()!!)}. " +
+                    "The original block is untouched; attach manually or retry."
+            }
+
+            // 5. Archive the original block LAST (archive-first would lose
+            //    the attachment on a mid-flight failure).
+            archiveBlock(project, blockId)
+            return "Moved file '$filename'" +
+                (if (uploadFilename != filename) " (uploaded as '$uploadFilename' — Notion does not " +
+                    "accept the original extension)" else "") +
+                " from block $blockId to page '$page' (id $targetPageId) and archived the original block."
+        } finally {
+            // Always clean up the temp file, even on failure.
+            runCatching { java.nio.file.Files.deleteIfExists(temp) }
+        }
+    }
+
+    /** Archives (soft-deletes) one block; best-effort, returns silently on failure. */
+    private fun archiveBlock(project: Project, blockId: String) {
+        val payload = buildJsonObject { put("archived", true) }
+        val token = token(project)
+        request("PATCH", "$API/blocks/$blockId", token,
+            payload.toString().toRequestBody("application/json".toMediaType()))
     }
 
     /** Best-effort MIME guess from the filename extension. */
@@ -708,7 +951,65 @@ object NotionTool {
         return "(untitled)"
     }
 
-    private fun resolveTitleToId(project: Project, title: String): String? {
+    private fun resolveTitleToId(project: Project, title: String): String? =
+        findExistingByTitle(project, title)?.first ?: fuzzyTitleToId(project, title)
+
+    /** Legacy fallback: top search hit for the title, exact or not. */
+    private fun fuzzyTitleToId(project: Project, title: String): String? {
+        val resp = post(project, "/search", buildJsonObject {
+            put("query", title)
+            put("filter", buildJsonObject {
+                put("property", "object")
+                put("value", "page")
+            })
+        })
+        val hits = resp.getOrNull()?.get("results")?.jsonArray ?: return null
+        return (hits.firstOrNull() as? JsonObject)?.get("id")?.jsonPrimitive?.content
+            ?.let(WriteRoot::normalizeNotionId)
+    }
+
+    /**
+     * Near-duplicate check for the write guard: an accessible page whose title
+     * matches after stripping a trailing "2"/"(copy)"/"- notes" style
+     * qualifier (either side) — the residue of failed search-then-create
+     * loops. Returns (id, existingTitle) or null.
+     */
+    private fun nearDuplicatePage(project: Project, title: String): Pair<String, String>? {
+        val base = titleBase(title)
+        if (base.isEmpty()) return null
+        val resp = post(project, "/search", buildJsonObject {
+            put("query", base)
+            put("filter", buildJsonObject {
+                put("property", "object")
+                put("value", "page")
+            })
+        })
+        val hits = resp.getOrNull()?.get("results")?.jsonArray ?: return null
+        for (hit in hits) {
+            val o = runCatching { hit.jsonObject }.getOrNull() ?: continue
+            val t = pageTitle(o)
+            if (t.equals(title, ignoreCase = true)) continue
+            if (titleBase(t) == base) {
+                return (o["id"]?.jsonPrimitive?.content?.let(WriteRoot::normalizeNotionId) ?: "") to t
+            }
+        }
+        return null
+    }
+
+    /** Title without a trailing " 2", "(copy)", "- notes", " version" style qualifier. */
+    private fun titleBase(title: String): String =
+        title.replace(Regex("\\s*[-–(]?\\s*(copy|kopi|notes|note|draft|v\\d+|\\d+)\\s*\\)?\\s*$", RegexOption.IGNORE_CASE), "")
+            .trim()
+            .lowercase()
+
+    /**
+     * Exact-title (case-insensitive) page lookup used by the duplicate guard:
+     * returns (id, url) when a page with exactly this title exists among the
+     * integration's accessible pages, so notion_write_page can refuse instead
+     * of creating a near-duplicate. Unlike [resolveTitleToId] it does NOT fall
+     * back to the top hit — an empty answer means "no exact match".
+     */
+    private fun findExistingByTitle(project: Project, title: String): Pair<String, String>? {
         val resp = post(project, "/search", buildJsonObject {
             put("query", title)
             put("filter", buildJsonObject {
@@ -719,13 +1020,11 @@ object NotionTool {
         val hits = resp.getOrNull()?.get("results")?.jsonArray ?: return null
         for (hit in hits) {
             val o = runCatching { hit.jsonObject }.getOrNull() ?: continue
-            if (pageTitle(o).equals(title, ignoreCase = true)) {
-                return o["id"]?.jsonPrimitive?.content?.let(WriteRoot::normalizeNotionId)
-            }
+            if (!pageTitle(o).equals(title, ignoreCase = true)) continue
+            val id = o["id"]?.jsonPrimitive?.content?.let(WriteRoot::normalizeNotionId) ?: continue
+            return id to (o["url"]?.jsonPrimitive?.content ?: "")
         }
-        // Fall back to the top hit.
-        return (hits.firstOrNull() as? JsonObject)?.get("id")?.jsonPrimitive?.content
-            ?.let(WriteRoot::normalizeNotionId)
+        return null
     }
 
     // ------------------------------------------------------------ blocks → markdown
@@ -756,7 +1055,7 @@ object NotionTool {
             ?.joinToString("") { (it as? JsonObject)?.get("plain_text")?.jsonPrimitive?.content.orEmpty() }
             .orEmpty()
         val indent = "  ".repeat(depth)
-        if (withIds && type in EDITABLE_BLOCKS) {
+        if (withIds && (type in EDITABLE_BLOCKS || type in FILE_BLOCKS)) {
             sb.append(indent).append("(block_id: ").append(id).append(") ")
         }
         when (type) {
@@ -773,9 +1072,20 @@ object NotionTool {
                 .append("]  (sub-page, read with notion_read_page if needed)\n")
             "child_database" -> sb.append(indent).append("[database]  (content not flattened)\n")
             "image", "video", "file", "pdf" -> {
-                val url = block[type]?.jsonObject?.get("file")?.jsonObject?.get("url")
-                    ?.jsonPrimitive?.content ?: ""
-                sb.append(indent).append("[").append(type).append("] ").append(url).append("\n")
+                val obj = block[type]?.jsonObject
+                val url = obj?.get("file")?.jsonObject?.get("url")?.jsonPrimitive?.content
+                    ?: obj?.get("external")?.jsonObject?.get("url")?.jsonPrimitive?.content ?: ""
+                // File attachments carry a name; images may have a caption —
+                // both help the model tell multiple attachments apart.
+                val name = obj?.get("name")?.jsonPrimitive?.content
+                    ?: obj?.get("caption")?.jsonArray?.joinToString("") {
+                        (it as? JsonObject)?.get("plain_text")?.jsonPrimitive?.content.orEmpty()
+                    }.orEmpty()
+                sb.append(indent).append("[").append(type).append("]")
+                if (name.isNotBlank()) sb.append(" ").append(name)
+                sb.append(" ").append(url)
+                sb.append("  (deletable with notion_update_block archive=true)")
+                sb.append("\n")
             }
             "toggle" -> sb.append(indent).append("▸ ").append(texts).append("\n")
             else -> if (texts.isNotBlank()) sb.append(indent).append(texts).append("\n\n")
@@ -792,6 +1102,15 @@ object NotionTool {
         "paragraph", "heading_1", "heading_2", "heading_3",
         "bulleted_list_item", "numbered_list_item", "quote", "toggle", "callout",
     )
+
+    /**
+     * Attachment-type blocks. Their ids are NOT surfaced for notion_update_block
+     * (Notion cannot change a file block's content in place) but they ARE
+     * needed for deletion (PATCH archived=true works on any block) and
+     * notion_move_file — so include them in the block-id markers even though
+     * they are not "editable".
+     */
+    private val FILE_BLOCKS = setOf("image", "video", "file", "pdf")
 
     // ------------------------------------------------------------ databases
 

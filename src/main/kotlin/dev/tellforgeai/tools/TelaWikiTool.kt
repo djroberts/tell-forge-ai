@@ -77,6 +77,8 @@ object TelaWikiTool {
                         )
                     }
                     append("\n\nUse wiki_read_page with the page id to read a page.")
+                    append("\nBefore creating pages, check this list for existing ones — ")
+                    append("wiki_write_page with an existing title replaces that page instead.")
                 }.let { truncate(it) }
             },
             onFailure = { e -> "Error: wiki_search failed — ${describe(e)}" },
@@ -184,6 +186,15 @@ object TelaWikiTool {
                 onFailure = { e -> "Error: wiki_write_page (update) failed — ${describe(e)}" },
             )
         } else {
+            // Near-duplicate guard FIRST (before approval): a sibling page whose
+            // title differs only by a trailing qualifier ("Foo 2", "Foo notes",
+            // "(copy)") usually means the agent failed to find the real page —
+            // make it retry with the existing page id instead of adding sprawl.
+            nearDuplicateInSpace(project, spaceId, title)?.let { (id, t) ->
+                return "Error: this looks like a duplicate of existing page '$t' (id $id). " +
+                    "Do NOT create a copy — update the existing page with wiki_write_page " +
+                    "using its exact title, or read it first with wiki_read_page."
+            }
             if (!approveWrite(project, WikiWriteAction.CREATE,
                     "TellForgeAI wants to CREATE this tela wiki page:\n\n$title\n\n" +
                         body.take(500) + (if (body.length > 500) "\n…" else "") + "\n\nAllow?",
@@ -291,6 +302,33 @@ object TelaWikiTool {
         }
         return null
     }
+
+    /**
+     * Possible near-duplicate of [title] in the space: an existing page whose
+     * title is the same base stripped of a trailing "2", "(copy)", "notes"
+     * style qualifier — or the requested title being that of an existing page
+     * plus one. Returns (id, existingTitle) or null.
+     */
+    private fun nearDuplicateInSpace(project: Project, spaceId: String, title: String): Pair<String, String>? {
+        val resp = get(project, "/api/pages?space_id=$spaceId&tree=1")
+        val pages = resp.getOrNull()?.get("pages")?.jsonArray ?: return null
+        val base = titleBase(title)
+        for (p in pages) {
+            val o = runCatching { p.jsonObject }.getOrNull() ?: continue
+            val t = o["title"]?.jsonPrimitive?.content ?: continue
+            if (t.equals(title, ignoreCase = true)) continue // exact handled elsewhere
+            if (titleBase(t) == base) {
+                return (o["id"]?.jsonPrimitive?.content ?: "") to t
+            }
+        }
+        return null
+    }
+
+    /** Title without a trailing " 2", "(copy)", "- notes", " version" style qualifier. */
+    private fun titleBase(title: String): String =
+        title.replace(Regex("\\s*[-–(]?\\s*(copy|kopi|notes|note|draft|v\\d+|\\d+)\\s*\\)?\\s*$", RegexOption.IGNORE_CASE), "")
+            .trim()
+            .lowercase()
 
     private fun resolveSpaceByName(project: Project, name: String): String? {
         val resp = get(project, "/api/spaces")

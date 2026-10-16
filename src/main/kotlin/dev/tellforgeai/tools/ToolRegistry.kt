@@ -110,7 +110,8 @@ object ToolRegistry {
             "wiki_search",
             "Keyword-search the project's tela wiki (configured via 'Configure Integrations…', " +
                 "Tela wiki tab). Read-only, both modes, no approval. " +
-                "If no wiki is configured the call fails — do not retry; say so and move on.",
+                "If no wiki is configured the call fails — do not retry; say so and move on. " +
+                "Search this before any wiki page creation to rule out existing duplicates.",
             jsonObjectProps(
                 "query" to "Search query; short and specific works best.",
             ),
@@ -131,9 +132,11 @@ object ToolRegistry {
                 "page with the same title in the target space (confirmation per the user's " +
                 "'Ask permission' settings). When the user configured a write root, creates are " +
                 "pinned as children of that root and updates outside its subtree are refused. " +
-                "Forge mode only. Do not call this repeatedly for the same title — prefer one " +
-                "well-formed page; to extend an existing page tell the user and include the " +
-                "full new body in one call.",
+                "Forge mode only. Verify the exact title with wiki_search first; a call with an " +
+                "existing title REPLACES that page's body in one shot — that is the correct " +
+                "way to update a page. Do not spin up variant titles like 'Foo', 'Foo 2', " +
+                "'Foo Notes' — keep one page per topic; to extend an existing page include " +
+                "the full new body in one call.",
             jsonObjectProps(
                 "title" to "Page title.",
                 "content" to "Page body in markdown.",
@@ -155,33 +158,36 @@ object ToolRegistry {
         // Notion tools, gated by the per-project Notion integration.
         if (instructionsEnabled) spec(
             "instructions_read",
-            "Read the AI instructions markdown from the user-maintained configuration repo " +
-                "(configured via 'Configure Instructions Repo…', Config button). Returns the raw " +
-                "file(s) as stored — call this before editing so you see original section markers. " +
-                "Read-only, both modes, no approval.",
+            "Read the user's AI instructions markdown (raw, with original section " +
+                "markers). Read-only, both modes, no approval. Call this before " +
+                "editing so you see original section markers.",
             jsonObjectProps(),
             required = listOf(),
         ) else null,
         if (instructionsEnabled && !planMode) spec(
             "instructions_write",
-            "Edit the AI instructions repo: write [content] to [path] (relative to the repo's " +
-                "instructions folder), show the user a diff, and after approval commit and push. " +
-                "Forge mode only and requires the user's write opt-in — does NOT edit project files. " +
-                "Read the file with instructions_read first; keep edits focused.",
+            "Edit the user's AI instructions: supply the COMPLETE new instructions " +
+                "text in [content] — it replaces the instructions wholesale. The API " +
+                "shows the user a diff and, after approval, saves it. Forge mode only " +
+                "and requires the user's write opt-in — this never touches project " +
+                "files. Read the instructions with instructions_read first; keep " +
+                "edits focused. A commit message is optional.",
             jsonObjectProps(
-                "path" to "Markdown file path inside the instructions folder, e.g. 'AGENTS.md'.",
-                "content" to "The complete new file content.",
+                "content" to "The complete new instructions text.",
                 "message" to "Optional commit message (Conventional Commit style).",
             ),
-            required = listOf("path", "content"),
+            required = listOf("content"),
         ) else null,
         if (notionEnabled) spec(
             "notion_search",
             "Keyword-search the user's Notion workspace for pages the integration can access " +
                 "(configured via the Notion tab of 'Configure Integrations…'). Read-only, both " +
-                "modes, no approval. Returns page ids/titles; use notion_read_page to read one.",
+                "modes, no approval. Returns page ids/titles; use notion_read_page to read one. " +
+                "To write, PREFER updating an existing page (notion_append_blocks / " +
+                "notion_update_block) over creating a new one.",
             jsonObjectProps(
-                "query" to "Search query; short and specific works best. Empty lists all accessible pages.",
+                "query" to "Search query; short and specific works best. Empty lists all accessible pages. " +
+                    "Search before any page creation to rule out existing duplicates.",
             ),
             required = listOf("query"),
         ) else null,
@@ -202,9 +208,13 @@ object ToolRegistry {
                 "write root, the parent is pinned to that root (a database root makes the " +
                 "page a row) and parents outside its subtree are refused. Forge mode only. " +
                 "Requires the user to have enabled Notion writes, and each write asks for " +
-                "approval. Do not call this repeatedly for the same title.",
+                "approval. BEFORE creating: run notion_search on the title; if a page with " +
+                "the same or a similar title already exists, update it instead " +
+                "(notion_append_blocks / notion_update_block) — creating near-duplicate " +
+                "pages (e.g. 'Foo', 'Foo 2', 'Foo Notes') scatters the user's workspace. " +
+                "Only create when the content truly does not fit any existing page.",
             jsonObjectProps(
-                "title" to "New page title.",
+                "title" to "New page title. Must not duplicate an existing page — check with notion_search first.",
                 "content" to "Page body in markdown (headings, bullets, code fences; 100 blocks max).",
                 "parent" to "Parent page id or exact title. Notion requires a parent page.",
             ),
@@ -212,11 +222,13 @@ object ToolRegistry {
         ) else null,
         if (notionEnabled && !planMode) spec(
             "notion_append_blocks",
-            "Append markdown content to an EXISTING Notion page (or block) instead of creating a " +
-                "duplicate page — PREFER THIS over notion_write_page when the page already exists. " +
-                "Forge mode only, requires Notion writes enabled, asks for approval per call.",
+            "PREFERRED WRITE TOOL: append markdown content to an EXISTING Notion page (or " +
+                "block) instead of creating a duplicate page — use this, or notion_update_block " +
+                "for surgical fixes, whenever the target page already exists. Extending a page " +
+                "in place is always better than a sibling copy. Forge mode only, requires " +
+                "Notion writes enabled, asks for approval per call.",
             jsonObjectProps(
-                "page" to "Existing page (or block) id or exact page title.",
+                "page" to "Existing page (or block) id or exact page title. Find it with notion_search / notion_read_page.",
                 "content" to "Markdown to append (headings, bullets, code fences; 100 blocks max).",
             ),
             required = listOf("page", "content"),
@@ -245,8 +257,12 @@ object ToolRegistry {
         if (notionEnabled && !planMode) spec(
             "notion_update_block",
             "Replace the text of one editable Notion block (paragraph, heading 1-3, list item, " +
-                "quote, toggle, callout) in place, or archive it. The agent can fix a page " +
-                "without rewriting it. Forge mode only, asks for approval.",
+                "quote, toggle, callout) in place, or archive it. File/image/video/pdf attachment " +
+                "blocks cannot have their text replaced, but they CAN be deleted with " +
+                "archive=true — attachment block ids are marked (block_id: …) in " +
+                "notion_read_page output next to [file]/[image] lines. The agent can fix a page " +
+                "or remove an unwanted attachment without rewriting it. Forge mode only, asks " +
+                "for approval.",
             jsonObjectProps(
                 "blockId" to "Block id from notion_read_page (call it with include_block_ids=true; " +
                     "ids appear as (block_id: …)).",
@@ -267,6 +283,22 @@ object ToolRegistry {
                 "caption" to "Optional caption for the attached block.",
             ),
             required = listOf("path"),
+        ) else null,
+        if (notionEnabled && !planMode) spec(
+            "notion_move_file",
+            "Move a file attachment or image BLOCK between Notion pages. The Notion API cannot " +
+                "re-parent file blocks, so this works by downloading the file to a temp location, " +
+                "re-uploading it to the target page, then archiving the original block (a " +
+                "copy-then-delete; the temp file is always deleted afterwards, and external-URL " +
+                "attachments are moved by re-embedding the URL without any download). Forge mode " +
+                "only, requires Notion writes enabled, asks for approval per call. Get the block " +
+                "id from notion_read_page with include_block_ids=true.",
+            jsonObjectProps(
+                "block_id" to "Block id of the source file/image block (from notion_read_page with include_block_ids=true).",
+                "page" to "Target page id or title.",
+                "caption" to "Optional new caption for the moved block.",
+            ),
+            required = listOf("block_id", "page"),
         ) else null,
         if (notionEnabled && !planMode) spec(
             "notion_create_comment",
@@ -437,6 +469,11 @@ object ToolRegistry {
                 planMode -> notAllowedInPlan(name)
                 !notionAllowed(project) -> notEnabled(name)
                 else -> NotionTool.uploadFile(project, args)
+            }
+            "notion_move_file" -> when {
+                planMode -> notAllowedInPlan(name)
+                !notionAllowed(project) -> notEnabled(name)
+                else -> NotionTool.moveFile(project, args)
             }
             "notion_create_comment" -> when {
                 planMode -> notAllowedInPlan(name)

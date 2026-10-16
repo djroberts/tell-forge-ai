@@ -6,70 +6,85 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * Tools for the user-maintained instructions repo (see
- * [InstructionsRepoService]). Read is free; write goes through a diff-based
- * approval dialog — the approval gates the commit AND push, since pushing
- * broadcasts the change to everyone sharing the repo — then commits as a
- * separate, versioned action in that repo (never the project's own).
+ * Tools over the user-maintained AI instructions. Deliberately capability-
+ * abstracted: the model never sees a repo, a path, a branch or a file name —
+ * only "the instructions". The file is always the service's canonical
+ * [InstructionsRepoService.CANONICAL_FILE]; any legacy `path` argument with a
+ * different value is rejected instead of honoured, so the tool surface cannot
+ * be talked into creating a second file in that repo.
  */
 object InstructionsTool {
 
-    /** Both modes: return the raw instructions markdown (or a named file). */
-    fun read(project: Project, args: JsonObject): String {
+    /**
+     * Only the canonical file is writable. Returns the normalized path when
+     * [supplied] is the canonical file (or null/absent, meaning "default"),
+     * else null when a different file was requested — a hard error: the
+     * instruction surface is a single document and no second file may ever
+     * be created next to it.
+     */
+    internal fun canonicalOrReject(supplied: String?): String? =
+        if (supplied == null || supplied.trim().equals(InstructionsRepoService.CANONICAL_FILE, ignoreCase = true))
+            InstructionsRepoService.CANONICAL_FILE
+        else null
+
+    /** Both modes: return the raw instructions markdown. */
+    fun read(project: Project, @Suppress("UNUSED_PARAMETER") args: JsonObject): String {
         val service = InstructionsRepoService.getInstance(project)
         service.ensureFresh()
         val text = service.instructions()
         if (text.isEmpty()) {
-            return "Error: no instructions synced yet (${service.status()}). " +
-                "Check the repo URL in the 'Configure Instructions Repo' dialog."
+            return "Error: no instructions synced yet. " +
+                "Check the instructions configuration in the integrations dialog."
         }
-        val file = args["path"]?.jsonPrimitive?.content
-        return if (file.isNullOrBlank()) {
-            "instructions at HEAD (${service.status()}):\n\n$text"
-        } else {
-            // Named file: re-read from clone via full snapshot only; the merged
-            // snapshot already contains per-file headers, so return it and let
-            // the model use the header section it needs.
-            "full instructions (${service.status()}):\n\n$text"
-        }
+        return "instructions (${service.toolStatus()}):\n\n$text"
     }
 
     /**
-     * Forge only. Writes the content, shows the diff, asks for approval
-     * (commit+push), then commits. [onCommitRequested] is the same approval
-     * callback used for commands; returning false declines the push.
+     * Forge only. Writes the whole new instructions content, shows the diff,
+     * asks for approval (commit+push), then commits. A legacy `path` argument
+     * is accepted only when it names the canonical file; anything else is a
+     * hard error — the tool surface is single-file by design.
+     * [onCommitRequested] is the same approval callback used for commands;
+     * returning false declines the push.
      */
     fun write(
         project: Project,
         args: JsonObject,
         onCommitRequested: (String) -> Boolean,
     ): String {
-        val path = args["path"]?.jsonPrimitive?.content?.trim().orEmpty()
+        // Legacy/rogue callers may still pass `path`; only the canonical file
+        // is writable, and anything else is rejected before touching the repo.
+        val supplied = args["path"]?.jsonPrimitive?.content?.trim()
+        if (canonicalOrReject(supplied) == null) {
+            return "Error: the instructions are a single document — do not pass a " +
+                "'path'; call instructions_write with just 'content'."
+        }
         val content = args["content"]?.jsonPrimitive?.content.orEmpty()
         val message = args["message"]?.jsonPrimitive?.content?.trim().orEmpty()
-        if (path.isBlank()) return "Error: 'path' is required."
-        if (content.isBlank()) return "Error: 'content' is required (full new file content)."
+        if (content.isBlank()) return "Error: 'content' is required (full new instructions text)."
 
         val service = InstructionsRepoService.getInstance(project)
+        val file = InstructionsRepoService.CANONICAL_FILE
         val diff = try {
-            service.previewChange(path, content)
+            service.previewChange(file, content)
         } catch (e: Exception) {
             return "Error: ${e.message ?: e.javaClass.simpleName}"
-        } ?: return "Error: invalid path '$path' (must stay inside the instructions folder)."
-        if (diff == "(no changes)") return "No changes to make — content matches what is already committed."
+        } ?: return "Error: instructions are not synced yet — ask the user to sync first."
+        if (diff == "(no changes)") {
+            return "No changes to make — the content matches what is already saved."
+        }
 
         val approved = onCommitRequested(
-            "Commit and push the following change to the instructions repo?\n\n" +
-                "File: $path\n\n$diff",
+            "Save the following change to the AI instructions?\n\n$diff",
         )
         if (!approved) {
-            service.discardChange(path)
-            return "Declined. The change was not committed or pushed."
+            service.discardChange(file)
+            return "Declined. The change was not saved."
         }
         return try {
-            service.commitAndPush(path, message)
+            service.commitAndPush(file, message)
         } catch (e: Exception) {
-            "Error committing/pushing: ${e.message ?: e.javaClass.simpleName}"
+            "Error saving: ${e.message ?: e.javaClass.simpleName}"
         }
     }
 }
