@@ -3,6 +3,8 @@ package dev.tellforgeai.llm
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import dev.tellforgeai.model.ApiProtocol
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -87,6 +89,34 @@ class OpenaiResponsesConnectorTest {
         assertEquals("function_call", obj["item"]?.let { item ->
             (item as kotlinx.serialization.json.JsonObject)["type"].toString()
         }?.trim('"'))
+    }
+
+    @Test
+    fun `sanitize drops orphan function_call_output and keeps paired one`() {
+        val items = listOf(
+            buildJsonObject {
+                put("type", kotlinx.serialization.json.JsonPrimitive("function_call_output"))
+                put("call_id", kotlinx.serialization.json.JsonPrimitive("call_orphan"))
+                put("output", kotlinx.serialization.json.JsonPrimitive("orphan"))
+            },
+            buildJsonObject {
+                put("type", kotlinx.serialization.json.JsonPrimitive("function_call"))
+                put("call_id", kotlinx.serialization.json.JsonPrimitive("call_ok"))
+                put("name", kotlinx.serialization.json.JsonPrimitive("read_file"))
+                put("arguments", kotlinx.serialization.json.JsonPrimitive("{}"))
+            },
+            buildJsonObject {
+                put("type", kotlinx.serialization.json.JsonPrimitive("function_call_output"))
+                put("call_id", kotlinx.serialization.json.JsonPrimitive("call_ok"))
+                put("output", kotlinx.serialization.json.JsonPrimitive("ok"))
+            },
+        )
+        val kept = OpenaiResponsesConnector().sanitize(items)
+        assertEquals(2, kept.size)
+        val types = kept.map { (it as kotlinx.serialization.json.JsonObject)["type"].toString() }
+        assertEquals(listOf("\"function_call\"", "\"function_call_output\""), types)
+        // Regression for HTTP 400 "No tool call found for function call output":
+        assertTrue(!kept.toString().contains("call_orphan"))
     }
 
     private fun invokeFlatToolSpec(spec: Map<String, Any>): kotlinx.serialization.json.JsonElement {

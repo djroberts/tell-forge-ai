@@ -6,9 +6,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * Tools over the user-maintained AI instructions. Deliberately capability-
- * abstracted: the model never sees a repo, a path, a branch or a file name —
- * only "the instructions". The file is always the service's canonical
+ * Tools over the user-maintained TellForge instructions (the
+ * tellforge_instructions_read / tellforge_instructions_write tool pair).
+ * Deliberately capability-abstracted: the model never sees a repo, a path,
+ * a branch or a file name — only "the TellForge instructions". The file is
+ * always the service's canonical
  * [InstructionsRepoService.CANONICAL_FILE]; any legacy `path` argument with a
  * different value is rejected instead of honoured, so the tool surface cannot
  * be talked into creating a second file in that repo.
@@ -57,7 +59,7 @@ object InstructionsTool {
         val supplied = args["path"]?.jsonPrimitive?.content?.trim()
         if (canonicalOrReject(supplied) == null) {
             return "Error: the instructions are a single document — do not pass a " +
-                "'path'; call instructions_write with just 'content'."
+                "'path'; call tellforge_instructions_write with just 'content'."
         }
         val content = args["content"]?.jsonPrimitive?.content.orEmpty()
         val message = args["message"]?.jsonPrimitive?.content?.trim().orEmpty()

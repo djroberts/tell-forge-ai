@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
  * last-known-good in-memory copy served when git fails (offline etc.).
  * All git work runs on the caller's background thread; nothing here blocks
  * the EDT and nothing throws into the chat path except the explicit
- * [commitAndPush] used by the instructions_write tool.
+ * [commitAndPush] used by the tellforge_instructions_write tool.
  */
 @Service(Service.Level.PROJECT)
 class InstructionsRepoService(private val project: Project) {
@@ -726,11 +726,14 @@ class InstructionsRepoService(private val project: Project) {
             if (subpath.isBlank()) CANONICAL_FILE else "$subpath/$CANONICAL_FILE"
 
         /** Content seeded into a brand-new empty instructions repo. */
-        fun startInstructionsFile(): String = """# Project AI Instructions
+        fun startInstructionsFile(): String = """# TellForge Instructions
 
-These instructions are injected into the AI assistant's system prompt.
-They are one single document — do not create additional files beside this
-one; everything worth persisting lives here.
+These instructions are injected into the TellForge AI assistant's system prompt.
+When the user asks to "update the TellForge instructions", change them only via
+the tellforge_instructions_write tool — never create or edit instruction files
+(AGENTS.md, INSTRUCTIONS.md, CLAUDE.md, etc.) in the user's project. They are
+one single document — do not create additional files beside this one;
+everything worth persisting lives here.
 
 ## Changelog and release versions
 

@@ -4,7 +4,22 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.11.0] - 2026-10-30
+
+### Added
+- Background per-chat engines: each chat runs its own turn loop, so you can send a message in one chat and keep chatting in another while the first continues in the background; the chat overview shows an animated spinner per running chat, a green check after the turn completes, and a stop button on the row
+- Per-chat provider selection: the provider dropdown lives inside the chat, each chat remembers which provider it used, and switching chats restores that chat's own provider (deleted profiles fall back to the project default)
+- Persisted per-chat turn status (`lastTurnStatus`/`lastTurnPlanMode`): end-of-turn markers in the transcript and the overview "complete"/"stopped"/"error" indicators survive closing and reopening the tool window
+- Chat overview rows show the chat's provider on the right edge (only when set)
+- Model ids fetched from a provider's `/models` endpoint are now sorted alphabetically in all dropdowns (settings suggestions, etc.)
+
+### Changed
+- Instruction tools renamed to `tellforge_instructions_read` / `tellforge_instructions_write` and descriptions rewritten so "update the TellForge instructions" routes directly to the tool pair — and models are explicitly told never to create or edit instruction files (AGENTS.md, INSTRUCTIONS.md, etc.) in the user's project
+- The default seeded `INSTRUCTIONS.md` content is retitled "TellForge Instructions" and now tells the model to update instructions only via `tellforge_instructions_write`, never by creating AGENTS.md/CLAUDE.md-style files in the project
+
+### Fixed
+- Assistant responses that stream normally are no longer persisted twice, which made every reopened chat render the answer twice (chat engine)
+- Settings: dropdown options are alphabetically ordered (price/latency/throughput sort for OpenRouter routing, Brave-first web-search provider combo) and the provider list keeps alphabetical order, including inserting new profiles at their sorted position (settings)
 
 ## [0.10.0] - 2026-10-16
 

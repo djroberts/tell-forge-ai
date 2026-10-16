@@ -31,7 +31,7 @@ class TellForgeAIConfigurable : Configurable {
     private val reasoningEffortField = JBTextField()
     private val contextWindowField = JBTextField()
     private val timeoutField = JBTextField()
-    private val webSearchProviderCombo = JComboBox(arrayOf("duckduckgo", "brave"))
+    private val webSearchProviderCombo = JComboBox(arrayOf("brave", "duckduckgo"))
     /** Longest-side cap for pasted images: 256/512/1024/2048/Original. */
     private val pastedImageSizeCombo = JComboBox(arrayOf("256", "512", "1024", "2048", "Original"))
     private val braveKeyField = JPasswordField()
@@ -77,9 +77,11 @@ class TellForgeAIConfigurable : Configurable {
 
     init {
         deletedThisSession.addAll(TellForgeAISettings.getInstance().profiles().map { it.id })
-        TellForgeAISettings.getInstance().profiles().forEach { p ->
-            listModel.addElement(p.copy(apiKey = ApiKeyStore.get(p.id).orEmpty()))
-        }
+        TellForgeAISettings.getInstance().profiles()
+            .sortedBy { it.name.lowercase() }
+            .forEach { p ->
+                listModel.addElement(p.copy(apiKey = ApiKeyStore.get(p.id).orEmpty()))
+            }
         adoptOrphansIfAny()
         list.selectionMode = ListSelectionModel.SINGLE_SELECTION
         list.cellRenderer = object : DefaultListCellRenderer() {
@@ -413,9 +415,13 @@ class TellForgeAIConfigurable : Configurable {
             model = "",
             planModel = null,
         )
-        listModel.addElement(p)
-        list.selectedIndex = listModel.size - 1
-        currentEditorIndex = listModel.size - 1
+        // Insert at the sorted position (by name) so the list stays ordered.
+        val insertAt = listModel.elements().toList()
+            .indexOfFirst { it.name.lowercase() > p.name.lowercase() }
+            .let { if (it >= 0) it else listModel.size }
+        listModel.add(insertAt, p)
+        list.selectedIndex = insertAt
+        currentEditorIndex = insertAt
         // A brand-new profile has no fetched models — drop any suggestions left
         // over from the previously shown profile. Cleared here defensively (not
         // only via the selection callback) so the combo is guaranteed empty
@@ -681,9 +687,11 @@ class TellForgeAIConfigurable : Configurable {
         try {
             listModel.clear()
             deletedThisSession.addAll(TellForgeAISettings.getInstance().profiles().map { it.id })
-            TellForgeAISettings.getInstance().profiles().forEach { p ->
-                listModel.addElement(p.copy(apiKey = ApiKeyStore.get(p.id).orEmpty()))
-            }
+            TellForgeAISettings.getInstance().profiles()
+                .sortedBy { it.name.lowercase() }
+                .forEach { p ->
+                    listModel.addElement(p.copy(apiKey = ApiKeyStore.get(p.id).orEmpty()))
+                }
             currentEditorIndex = if (listModel.isEmpty) -1 else 0
             if (!listModel.isEmpty) list.selectedIndex = 0
             // Drop any model suggestions left over from the pre-reset session and

@@ -73,12 +73,97 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     enum class Mode(val label: String) { PLAN("Foretell"), ACT("Forge") }
 
-    private val client = LlmClient()
+    /** Per-chat turn engines (running in the background after you navigate away). */
+    private val runs = dev.tellforgeai.chat.ChatRunRegistry(project)
+
+    /**
+     * Repaints the overview roughly 2x/second while any chat runs in the
+     * background (animated "running" icon). Cheap: a small repaint of the list.
+     * Declared BEFORE the init block: refreshChatList() → updateListTicker()
+     * touches it during construction, and Kotlin initializes properties in
+     * declaration order — a `by lazy` delegate field would still be null then.
+     */
+    private val listTicker: javax.swing.Timer = javax.swing.Timer(500) {
+        if (runs.runningIds().isNotEmpty()) chatList.repaint()
+    }.apply { isRepeats = true }
+
+    /** Provider profile + its hydrated key captured at send time. */
+    private fun selectedProfile(): ProviderProfile? =
+        (profileCombo.selectedItem as? ProviderProfile)
+            ?: TellForgeAIProjectState.getInstance(project).selectedProfile()
+
+    /**
+     * Lazy accessor: the engine of the currently open chat. Creating it here
+     * wires the panel's rendering callbacks; every other chat's engine created
+     * before (with the same callbacks) is left running in the background.
+     */
+    private fun engineFor(chatId: String): dev.tellforgeai.chat.ChatEngine =
+        runs.engineFor(chatId) {
+            dev.tellforgeai.chat.ChatEngine(
+                project, chatId,
+                listener = object : dev.tellforgeai.chat.ChatEngine.Listener {
+                    override fun onAssistantDelta(delta: String) {
+                        if (chatId == currentChatId) {
+                            lastAssistantMarkdown.append(delta)
+                            if (lastAssistantMarkdown.isNotEmpty()) thinkingTimer.stop()
+                            throttledRepaint()
+                        } else {
+                            // Not displayed but not rendered either — engine holds the
+                            // full text; transcript is rebuilt from persistence on open.
+                        }
+                    }
+
+                    override fun onReasoningDelta(text: String) {
+                        if (chatId == currentChatId) {
+                            lastReasoning.append(text)
+                            throttledRepaint()
+                        }
+                    }
+
+                    override fun onToolPending(call: ToolCall) {
+                        if (chatId == currentChatId) appendToolPending(call)
+                    }
+
+                    override fun onToolResult(call: ToolCall, result: String) {
+                        if (chatId == currentChatId) appendToolResult(call, result)
+                    }
+
+                    override fun onSystem(text: String) {
+                        if (chatId == currentChatId) appendSystem(text)
+                    }
+
+                    override fun onUsageRecorded() {
+                        // Only meaningful for the visible chat; cheap enough to run anyway.
+                        if (chatId == currentChatId) updateStickyHeader()
+                    }
+
+                    override fun onTurnEnded(stopped: Boolean) {
+                        // The engine persisted the chat's lastTurnStatus before
+                        // calling this — the transcript/tail reads it from there.
+                        // If the user is watching this chat, reflect the turn end.
+                        if (chatId == currentChatId) {
+                            finishAssistantBlock()
+                            setStreaming(false)
+                        }
+                        refreshChatList()
+                        if (!stopped && chatId == currentChatId) updateStickyHeader()
+                    }
+                },
+                requestApproval = ::requestApproval,
+                projectContext = ::buildProjectContext,
+                instructionsLayer = ::instructionsLayer,
+            )
+        }
+
+    private val client: dev.tellforgeai.llm.LlmClient
+        get() = currentChatId?.let { runs.engine(it)?.client }
+            ?: fallbackClient
+
+    /** Cancel on dispose when no engine is active (e.g. before first send). */
+    private val fallbackClient = dev.tellforgeai.llm.LlmClient()
     private val history = mutableListOf<ChatMessage>()
     private var mode: Mode = Mode.PLAN
     private var streaming = false
-    /** Mode of the last successfully finished turn — drives the green "complete" status line. */
-    private var completedMode: Mode? = null
     /** Tool rounds executed in the current user turn (loop guard). */
     private var toolRounds = 0
     /** Most recent provider-reported prompt usage, for the live context estimate. */
@@ -116,7 +201,15 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     // --- Top bar ---
     private val homeButton = JButton(AllIcons.Actions.Back)
-    private val profileCombo = JComboBox<ProviderProfile>()
+    /**
+     * One shared model behind BOTH provider selectors (home overview + open
+     * chat). A Swing component can only have one parent, so two combos are
+     * needed; sharing the model keeps their selection in sync automatically
+     * without fragile event-driven mirroring.
+     */
+    private val profileComboModel = DefaultComboBoxModel<ProviderProfile>()
+    private val profileCombo = JComboBox(profileComboModel)
+    private val homeProfileCombo = JComboBox(profileComboModel)
     private val planButton = JRadioButton(Mode.PLAN.label, true)
     private val actButton = JRadioButton(Mode.ACT.label)
     private val homePlanButton = JRadioButton(Mode.PLAN.label, true)
@@ -290,13 +383,16 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val homeInputArea = JTextArea(3, 40)
 
     init {
-        Disposer.register(TellForgeAIToolWindowDisposable.get(project)) { client.cancel() }
+        Disposer.register(TellForgeAIToolWindowDisposable.get(project)) {
+            runs.disposeAll()
+            fallbackClient.cancel()
+        }
 
         homeButton.toolTipText = "Back to all chats"
         homeButton.addActionListener { showHome() }
         newChatButton.toolTipText = "New chat"
         newChatButton.addActionListener { newChat() }
-        profileCombo.renderer = object : DefaultListCellRenderer() {
+        val profileComboRenderer = object : DefaultListCellRenderer() {
             override fun getListCellRendererComponent(
                 list: JList<*>, value: Any?, index: Int, selected: Boolean, focused: Boolean,
             ) = super.getListCellRendererComponent(
@@ -305,15 +401,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 index, selected, focused,
             )
         }
-        profileCombo.addActionListener(ActionListener { onProfileSelected() })
-        // Re-sync from persisted settings every time the dropdown opens, so
-        // providers added/edited in the settings page show up immediately.
-        profileCombo.addPopupMenuListener(object : javax.swing.event.PopupMenuListener {
-            override fun popupMenuWillBecomeVisible(e: javax.swing.event.PopupMenuEvent) =
-                syncProfilesFromSettings()
-            override fun popupMenuWillBecomeInvisible(e: javax.swing.event.PopupMenuEvent) = Unit
-            override fun popupMenuCanceled(e: javax.swing.event.PopupMenuEvent) = Unit
-        })
+        for (combo in listOf(profileCombo, homeProfileCombo)) {
+            combo.renderer = profileComboRenderer
+            combo.addActionListener { onProfileSelected() }
+        }
         planButton.addActionListener { setMode(Mode.PLAN) }
         actButton.addActionListener { setMode(Mode.ACT) }
         homePlanButton.addActionListener { setMode(Mode.PLAN) }
@@ -337,10 +428,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         val top = JPanel(BorderLayout(8, 0)).apply {
             border = JBUI.Borders.empty(8, 10)
             add(homeButton, BorderLayout.WEST)
-            add(profileCombo, BorderLayout.CENTER)
+            add(JLabel("Chats"), BorderLayout.CENTER)
             val right = JPanel().apply {
                 isOpaque = false
-                add(newChatButton); add(testButton); add(integrationsButton); add(settingsButton)
+                add(newChatButton); add(integrationsButton); add(settingsButton)
             }
             add(right, BorderLayout.EAST)
         }
@@ -413,6 +504,15 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         chatList.emptyText.text = "No chats yet — type a message below to start one"
         chatList.cellRenderer = object : JPanel(BorderLayout(JBUI.scale(8), 0)), ListCellRenderer<Any> {
             val iconLabel = JLabel(AllIcons.FileTypes.Text)
+            /** Animated spinner while the chat has an active turn; green check after completion. */
+            val statusIcon = JLabel(null as javax.swing.Icon?)
+            val providerLabel = JLabel().apply {
+                font = font.deriveFont(font.size2D - 1f)
+                foreground = UIUtil.getLabelDisabledForeground()
+            }
+            val runningIcon = com.intellij.ui.AnimatedIcon.Default()
+            val completeIcon = AllIcons.Actions.Checked
+            val stopIcon = AllIcons.Actions.Suspend
             val titleLabel = JLabel()
             val timeLabel = JLabel().apply {
                 font = font.deriveFont(font.size2D - 1f)
@@ -421,10 +521,18 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             val delLabel = JLabel(AllIcons.Actions.GC).apply {
                 toolTipText = "Delete chat"
             }
+            /** Shown instead of the delete icon while this chat's turn is running. */
+            val stopLabel = JLabel(stopIcon).apply {
+                toolTipText = "Stop this chat's running turn"
+            }
             val textPanel = JPanel(BorderLayout()).apply {
                 isOpaque = false
                 add(titleLabel, BorderLayout.CENTER)
-                add(timeLabel, BorderLayout.SOUTH)
+                val south = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 0)).apply {
+                    isOpaque = false
+                    add(timeLabel)
+                }
+                add(south, BorderLayout.SOUTH)
             }
             val card = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
                 isOpaque = true
@@ -434,7 +542,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 )
                 add(iconLabel, BorderLayout.WEST)
                 add(textPanel, BorderLayout.CENTER)
-                add(delLabel, BorderLayout.EAST)
+                /* LINE_END slot is filled per row by [rightEdge] below. */
+            }
+            /** Right edge: provider badge · status icon · stop/delete. */
+            val rightEdge = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 4, 0)).apply {
+                isOpaque = false
             }
             val outer = JPanel(BorderLayout()).apply {
                 isOpaque = false
@@ -450,9 +562,40 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 list: JList<*>, value: Any?, index: Int, selected: Boolean, focused: Boolean,
             ): Component {
                 val chat = value as? ChatSession
+                val id = chat?.id
+                val running = runs.isRunning(id)
+                // Status icon keys off the chat's persisted last-turn status:
+                // it survives engine drops (navigating away, IDE restart) unlike
+                // the runtime-only registry flags it used before.
+                val stopped = id != null && chat?.lastTurnStatus == "stopped"
+                val completed = id != null && chat?.lastTurnStatus == "complete"
                 titleLabel.text = chat?.title ?: ""
                 titleLabel.font = titleLabel.font.deriveFont(java.awt.Font.BOLD)
                 timeLabel.text = chat?.let { relativeTime(it.updatedAt) } ?: ""
+                // Provider badge lives in the LINE_END slot on the RIGHT edge of
+                // the row (bounded, gray, small). When no provider is set for the
+                // chat yet, it stays empty.
+                providerLabel.text = chat?.providerName?.takeIf { it.isNotBlank() }?.let { it.trim() } ?: ""
+                providerLabel.isVisible = providerLabel.text.isNotBlank()
+                providerLabel.toolTipText = "Provider used in this chat"
+                when {
+                    running -> {
+                        statusIcon.icon = runningIcon
+                        statusIcon.toolTipText = "Running…"
+                    }
+                    stopped -> {
+                        statusIcon.icon = null
+                        statusIcon.toolTipText = "Stopped"
+                    }
+                    completed -> {
+                        statusIcon.icon = completeIcon
+                        statusIcon.toolTipText = "Last turn completed"
+                    }
+                    else -> {
+                        statusIcon.icon = null
+                        statusIcon.toolTipText = null
+                    }
+                }
                 val hovered = index == hoveredChatIndex && !selected
                 val bg = when {
                     selected -> UIUtil.getListSelectionBackground(true)
@@ -460,7 +603,25 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                     else -> cardBg
                 }
                 card.background = bg
-                delLabel.isVisible = selected || hovered
+                // Right edge, left→right: provider badge, status icon, then the
+                // action icon (stop while running, delete otherwise). Filled per
+                // render: Swing components can only have one parent at a time.
+                card.remove(rightEdge)
+                rightEdge.removeAll()
+                rightEdge.isOpaque = false
+                if (providerLabel.text.isNotBlank()) {
+                    rightEdge.add(providerLabel)
+                }
+                rightEdge.add(statusIcon)
+                rightEdge.add(if (running) stopLabel else delLabel)
+                card.add(rightEdge, BorderLayout.LINE_END)
+                rightEdge.revalidate()
+                rightEdge.repaint()
+                // Running chats offer a stop affordance instead of delete;
+                // delete stays reachable via the context menu (right-click).
+                stopLabel.isVisible = running
+                delLabel.isVisible = !running && (selected || hovered)
+                providerLabel.isVisible = providerLabel.text.isNotBlank()
                 return outer
             }
         }
@@ -488,8 +649,17 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 chatList.selectedIndex = idx
                 val chat = chatListModel.get(idx)
                 val r = chatList.getCellBounds(idx, idx)
-                // Click on the trash icon (right edge of the row) deletes; anywhere else opens.
-                if (e.x >= r.x + r.width - JBUI.scale(42)) deleteChat(chat) else openChat(chat.id)
+                // Click on the right-edge icons deletes (not running) or stops (running);
+                // anywhere else opens the chat.
+                val inStopStrip = e.x >= r.x + r.width - JBUI.scale(42)
+                if (inStopStrip && runs.isRunning(chat.id)) {
+                    runs.stop(chat.id)
+                    refreshChatList()
+                } else if (inStopStrip) {
+                    deleteChat(chat)
+                } else {
+                    openChat(chat.id)
+                }
             }
             override fun mousePressed(e: MouseEvent) = maybeShowPopup(e)
             override fun mouseReleased(e: MouseEvent) = maybeShowPopup(e)
@@ -497,7 +667,17 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 if (!e.isPopupTrigger) return
                 val idx = chatList.locationToIndex(e.point)
                 if (idx >= 0) chatList.selectedIndex = idx
+                val chat = chatListModel.get(idx)
                 JPopupMenu().apply {
+                    if (chat != null && runs.isRunning(chat.id)) {
+                        add("Stop chat").also { item ->
+                            item.addActionListener {
+                                runs.stop(chat.id)
+                                refreshChatList()
+                            }
+                            add(item)
+                        }
+                    }
                     add("Delete chat").also { item ->
                         item.addActionListener { deleteSelectedChat() }
                         add(item)
@@ -553,7 +733,14 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             add(modelInfoLabel, BorderLayout.CENTER)
             add(refreshPricingButton, BorderLayout.EAST)
         }
-        homeHeader.add(modelInfoRow, BorderLayout.SOUTH)
+        // Provider selector is available on the overview too: pick a provider
+        // (and see its pricing) before starting a chat or hitting "+".
+        val homeProfileRow = JPanel(BorderLayout(4, 2)).apply {
+            isOpaque = false
+            add(homeProfileCombo, BorderLayout.CENTER)
+            add(modelInfoRow, BorderLayout.SOUTH)
+        }
+        homeHeader.add(homeProfileRow, BorderLayout.SOUTH)
         chatList.border = JBUI.Borders.empty(0, 6, 6, 6)
         val homeCard = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.emptyTop(4)
@@ -561,8 +748,23 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             add(homeScroll, BorderLayout.CENTER)
             add(homeBottomWithImages, BorderLayout.SOUTH)
         }
+        /**
+         * Provider selector lives INSIDE the chat card (shown only when a chat
+         * is open). Each chat remembers its provider ([ChatSession.providerProfileId]);
+         * switching here changes this chat only.
+         */
+        val chatTop = JPanel(BorderLayout(8, 0)).apply {
+            border = JBUI.Borders.empty(6, 10, 0, 10)
+            add(profileCombo, BorderLayout.CENTER)
+            add(testButton, BorderLayout.EAST)
+        }
+        val chatHead = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(chatTop, BorderLayout.NORTH)
+            add(stickyHeader, BorderLayout.SOUTH)
+        }
         val chatCard = JPanel(BorderLayout()).apply {
-            add(stickyHeader, BorderLayout.NORTH)
+            add(chatHead, BorderLayout.NORTH)
             add(center, BorderLayout.CENTER)
             add(bottomWithImages, BorderLayout.SOUTH)
         }
@@ -586,8 +788,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     /** Shows the home screen listing all chats; the default view when no chat is chosen. */
     fun showHome() {
-        if (streaming) client.cancel()
-        setStreaming(false)
+        // The chat keeps running in the background ("running" icon in the list).
+        setStreaming(false) // transport untouched; panel-side streaming flag only
         currentChatId = null
         contextLookupModel = ""
         pricingLookupModel = ""
@@ -614,6 +816,17 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 .indexOfFirst { chatListModel[it].id == selectedId }
                 .takeIf { it >= 0 } ?: -1
         }
+        updateListTicker()
+    }
+
+    /**
+     * (moved above the init block — see the declaration near `runs` for why)
+     */
+
+    private fun updateListTicker() {
+        val needed = runs.runningIds().isNotEmpty()
+        if (needed && !listTicker.isRunning) listTicker.start()
+        else if (!needed && listTicker.isRunning) listTicker.stop()
     }
 
     private fun deleteSelectedChat() {
@@ -621,12 +834,23 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         deleteChat(chat)
     }
 
+    // (Stops from the overview no longer append a live "Stopped." note: the
+    // engine persists lastTurnStatus="stopped" and the chat's tail / next
+    // openChat() rebuild renders the marker from that persisted status.)
+
     private fun deleteChat(chat: ChatSession) {
         val answer = Messages.showYesNoDialog(
             project, "Delete chat \"${chat.title}\"?", "TellForgeAI", Messages.getQuestionIcon(),
         )
         if (answer == Messages.YES) {
+            // If the chat's turn is running, stop it first so the engine's
+            // background tool loop doesn't resurrect the deleted chat record.
+            if (runs.isRunning(chat.id)) runs.stop(chat.id)
             TellForgeAIChatsState.getInstance(project).delete(chat.id)
+            if (currentChatId == chat.id) {
+                currentChatId = null
+                setStreaming(false)
+            }
             refreshChatList()
         }
     }
@@ -635,7 +859,6 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun openChat(chatId: String) {
         val chat = TellForgeAIChatsState.getInstance(project).get(chatId) ?: return
         currentChatId = chat.id
-        completedMode = null
         contextLookupModel = ""
         pricingLookupModel = ""
         contextTrimNotified = false
@@ -647,6 +870,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         toolRounds = 0
         chatModelInfoLabel.text = modelInfoLabel.text
         chatModelInfoLabel.toolTipText = modelInfoLabel.toolTipText
+        // Restore THIS chat's provider + mode instead of the project default.
+        restoreModeFromChat(chat)
         history.clear()
         history.addAll(chat.messages)
         finishedBlocks.clear()
@@ -680,17 +905,76 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 "tool" -> { /* tool results are folded into the following turn; skip */ }
             }
         }
+        // End-of-turn marker for the chat's LAST turn, persisted in the session
+        // so it survives reopening the chat and IDE restarts. Rendered as a
+        // finished block exactly where the turn ended (e.g. after tool rounds
+        // that produced no final text — previously these showed nothing).
+        // Lives outside the loop: only the latest turn's end is restored.
+        if (!runs.isRunning(chatId) && chat.lastTurnStatus.isNotBlank()) {
+            val marker = when (chat.lastTurnStatus) {
+                "complete" -> "<div class='mode' style='color:#3fb950;font-weight:bold'>" +
+                    (if (chat.lastTurnPlanMode) "✓ Planning complete" else "✓ Task complete") + "</div>"
+                "stopped" -> "<div class='mode'>Stopped.</div>"
+                "error" -> "<div class='mode' style='color:#f85149;font-weight:bold'>⚠ Last turn failed</div>"
+                else -> ""
+            }
+            if (marker.isNotEmpty()) finishedBlocks.add(marker)
+        }
         rebuildTranscript()
         (profileCombo.selectedItem as? ProviderProfile)?.let { ensureModelInfo(it) }
         updateStickyHeader()
+        // Reopen a running chat live: bind its engine's buffered stream again.
+        setStreaming(runs.isRunning(chatId))
+        bindLiveEngine(chatId)
         showCard(CARD_CHAT)
     }
 
+    /**
+     * Renders the engine's in-flight assistant stream into the tail pane when a
+     * running chat is re-opened: partial text keeps growing live.
+     */
+    private fun bindLiveEngine(chatId: String) {
+        val engine = runs.engine(chatId) ?: return
+        if (!engine.running) return
+        val partial = engine.streamingTextSnapshot()
+        if (partial.isNotBlank()) {
+            lastAssistantMarkdown.setLength(0)
+            lastAssistantMarkdown.append(partial)
+            repaintTranscript()
+        }
+    }
+
+    /**
+     * Per-chat provider/mode: switching to a chat switches the top-bar combo
+     * and mode radios to what that chat used last, then writes the choice
+     * back to the chat. Persists nothing globally — the project default is
+     * only used for a brand-new chat.
+     */
+    private fun restoreModeFromChat(chat: ChatSession) {
+        val profiles = TellForgeAISettings.getInstance().profiles()
+        val stored = profiles.firstOrNull { it.id == chat.providerProfileId }
+        // Remembered provider no longer exists (deleted/renamed): fall back to the
+        // project default (top of the list), never a stale hidden selection.
+        val profile = stored
+            ?: (profileCombo.selectedItem as? ProviderProfile)
+            ?: TellForgeAIProjectState.getInstance(project).selectedProfile()
+        if (profile != null) {
+            val key = ApiKeyStore.get(profile.id).orEmpty()
+            val hydrated = if (key.isNotBlank()) profile.copy(apiKey = key) else profile
+            if (hydrated != profileCombo.selectedItem) profileCombo.selectedItem = hydrated
+        }
+        chat.mode.let { m ->
+            when (m.lowercase()) {
+                "plan" -> setMode(Mode.PLAN)
+                "act" -> setMode(Mode.ACT)
+            }
+        }
+    }
+
     private fun newChat() {
-        if (streaming) client.cancel()
+        // Does NOT cancel the previous chat: it keeps running in the background.
         setStreaming(false)
         currentChatId = null
-        completedMode = null
         contextLookupModel = ""
         pricingLookupModel = ""
         contextTrimNotified = false
@@ -725,15 +1009,15 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         send()
     }
 
-    /** Persists the current in-memory history into the active chat session. */
+    /**
+     * Persists panel-side edits (images attached to a user message) into the
+     * active chat session. History content itself is persisted by the chat
+     * engine; the panel only renders.
+     */
     private fun persistChat() {
         val id = currentChatId ?: return
         val state = TellForgeAIChatsState.getInstance(project)
-        val chat = state.get(id) ?: ChatSession.new("New chat").copy(id = id)
-        chat.messages.clear()
-        chat.messages.addAll(history)
-        chat.contextSummary = contextSummary
-        chat.compactedMessageCount = compactedMessageCount.coerceIn(0, history.size)
+        val chat = state.get(id) ?: return
         chat.updatedAt = System.currentTimeMillis()
         chat.title = chat.autoTitle()
         state.upsert(chat)
@@ -752,42 +1036,65 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     fun refreshProfiles() {
         syncProfilesFromSettings()
-        if (profileCombo.itemCount == 0) {
+        if (profileComboModel.size == 0) {
             appendSystem("No providers configured. Click the gear icon to add an OpenAI-compatible provider (URL, key, model).")
         }
     }
 
-    /** Reloads the combo items from [TellForgeAISettings], preserving the current selection when possible. */
+    /**
+     * Reloads the shared combo model from [TellForgeAISettings], sorted by
+     * profile name, preserving the current selection when possible.
+     */
     private fun syncProfilesFromSettings() {
         val profiles = TellForgeAISettings.getInstance().profiles()
-        val currentItems = (0 until profileCombo.itemCount)
-            .mapNotNull { profileCombo.getItemAt(it) as? ProviderProfile }
         // Hydrate before comparing: profiles read from XML have apiKey="";
         // compare both persisted fields and the key so key rotations in PasswordSafe
         // are reflected when settings are applied and the dropdown is refreshed.
         val hydrated = profiles.map { p ->
             val key = ApiKeyStore.get(p.id).orEmpty()
             if (key.isNotBlank()) p.copy(apiKey = key) else p
-        }
+        }.sortedBy { it.name.lowercase() }
+        val currentItems = (0 until profileComboModel.size)
+            .mapNotNull { profileComboModel.getElementAt(it) }
         if (hydrated == currentItems) return // avoid unnecessary events/rebuilds
 
-        val previouslySelectedId = (profileCombo.selectedItem as? ProviderProfile)?.id
+        // Rebuilding the model while either dropdown popup is open closes the
+        // popup mid-interaction (the dropdown then looks dead / unclickable).
+        // Only apply changes when no popup is showing; settings changes route
+        // through refreshProfiles() after the dialog closes anyway.
+        if (profileCombo.isPopupVisible || homeProfileCombo.isPopupVisible) return
+
+        val previouslySelectedId = (profileComboModel.selectedItem as? ProviderProfile)?.id
             ?: TellForgeAIProjectState.getInstance(project).selectedProfileId
-        profileCombo.removeAllItems()
-        hydrated.forEach { profileCombo.addItem(it) }
+        profileComboModel.removeAllElements()
+        hydrated.forEach { profileComboModel.addElement(it) }
         // Select from the HYDRATED list, NOT from the raw XML profiles list.
         // A raw XML copy has apiKey="" because the key is @Transient.
         val select = hydrated.firstOrNull { it.id == previouslySelectedId }
             ?: hydrated.firstOrNull()
-        if (select != null) profileCombo.selectedItem = select
-        else TellForgeAIProjectState.getInstance(project).selectedProfileId = null
-        TellForgeAIProjectState.getInstance(project).selectedProfileId = select?.id
-        if (select != null) ensureModelInfo(select)
+        profileComboModel.selectedItem = select
+        if (select != null) {
+            TellForgeAIProjectState.getInstance(project).selectedProfileId = select.id
+            ensureModelInfo(select)
+        } else {
+            TellForgeAIProjectState.getInstance(project).selectedProfileId = null
+        }
     }
 
     private fun onProfileSelected() {
-        val p = profileCombo.selectedItem as? ProviderProfile ?: return
+        val p = profileComboModel.selectedItem as? ProviderProfile ?: return
         TellForgeAIProjectState.getInstance(project).selectedProfileId = p.id
+        // Per-chat memory: the dropdown lives inside the chat, so switching it
+        // changes THIS chat's provider only. Other chats keep their own.
+        currentChatId?.let { id ->
+            val chat = TellForgeAIChatsState.getInstance(project).get(id)
+            if (chat != null && !runs.isRunning(id)) {
+                chat.providerProfileId = p.id
+                chat.providerName = p.name
+                TellForgeAIChatsState.getInstance(project).upsert(chat)
+                refreshChatList()
+            }
+        }
         ensureModelInfo(p)
         updateStickyHeader()
     }
@@ -988,7 +1295,9 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun send() {
-        val profile = TellForgeAIProjectState.getInstance(project).selectedProfile()
+        // Use the combo item (carries the hydrated apiKey from PasswordSafe)
+        // rather than a raw XML copy which always has apiKey = "" (@Transient).
+        val profile = selectedProfile()
         if (profile == null) {
             Messages.showInfoMessage(project, "Add a provider first (gear icon).", "TellForgeAI")
             return
@@ -997,7 +1306,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         val rawText = inputArea.text.trim()
         // @path tokens in the message body load full-resolution images from disk.
         val (text, referencedImages, referencedPaths) = extractImageReferences(rawText)
-        if ((text.isEmpty() && images.isEmpty() && referencedImages.isEmpty()) || streaming) return
+        if (text.isEmpty() && images.isEmpty() && referencedImages.isEmpty()) return
+        if (currentChatId != null && runs.isRunning(currentChatId)) return
         pendingImages.clear()
         pendingImageHashes.clear()
         refreshImageStrip()
@@ -1009,255 +1319,52 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             currentChatId = chat.id
             TellForgeAIChatsState.getInstance(project).upsert(chat)
         }
+        val chatId = currentChatId!!
 
-        history += ChatMessage.user(text).apply {
-            this.images = images + referencedImages
-            this.referencedPaths = referencedPaths
-        }
-        compactionFailedForCurrentTurn = false
-        toolRounds = 0
-        persistChat()
+        // The engine owns the turn; the panel keeps rendering it only while
+        // this chat is displayed.
+        val engine = engineFor(chatId)
+        persistProfileChoice(profile)
         appendUser(text, images + referencedImages, referencedPaths)
         setStreaming(true)
         updateStickyHeader()
+        refreshChatList()
 
-        startTurn()
+        // send() appends the persisted user message; images attach to it after.
+        engine.send(text, mode == Mode.PLAN, profile)
+        withImagesInLastUserMessage(images + referencedImages, referencedPaths)
+    }
+
+    /** Attaches pasted/referenced images to the message the engine just appended. */
+    private fun withImagesInLastUserMessage(images: List<String>, referencedPaths: List<String>) {
+        if (images.isEmpty() && referencedPaths.isEmpty()) return
+        val chat = TellForgeAIChatsState.getInstance(project).get(currentChatId!!) ?: return
+        val last = chat.messages.lastOrNull { it.role == "user" } ?: return
+        last.images = (last.images + images).distinct()
+        last.referencedPaths = (last.referencedPaths + referencedPaths).distinct()
+        TellForgeAIChatsState.getInstance(project).upsert(chat)
+    }
+
+    /** Remembers this chat's provider so reopening restores it. */
+    private fun persistProfileChoice(profile: ProviderProfile) {
+        val chat = TellForgeAIChatsState.getInstance(project).get(currentChatId!!) ?: return
+        chat.providerProfileId = profile.id
+        chat.providerName = profile.name
+        chat.mode = mode.name.lowercase()
+        TellForgeAIChatsState.getInstance(project).upsert(chat)
     }
 
     /**
-     * One request/response round-trip. If the model responds with tool calls,
-     * they are executed (with approval for commands, unless the user disabled
-     * the approval prompt) and the results are fed back as a follow-up turn,
-     * until the model produces a final answer.
+     * The turn loop now lives in [dev.tellforgeai.chat.ChatEngine]; the panel
+     * only renders engine events while its chat is the one displayed. See
+     * [engineFor].
      */
-    private fun startTurn() {
-        // Use the combo item (carries the hydrated apiKey from PasswordSafe)
-        // rather than a raw XML copy which always has apiKey = "" (@Transient).
-        val profile = profileCombo.selectedItem as? ProviderProfile
-            ?: TellForgeAIProjectState.getInstance(project).selectedProfile()
-            ?: return
-        ensureModelInfo(profile)
 
-        // system prompt (with project context) is supplied fresh each request
-        val context = buildProjectContext()
-        val instructions = instructionsLayer(project)
-        val system = ChatMessage.system(Prompts.system(mode == Mode.PLAN, context, instructions))
-        val chatIdForCompaction = currentChatId
-        val window = contextWindow(profile)
-        val boundary = if (!compactionInProgress && !compactionFailedForCurrentTurn && window != null &&
-            ConversationCompactor.shouldCompact(lastPromptTokens, window)) {
-            ConversationCompactor.boundary(
-                history,
-                compactedMessageCount,
-                system.estimatedTokens() + contextSummary.length / 4 +
-                    (history.firstOrNull { it.role == "user" }?.estimatedTokens() ?: 0),
-                window,
-            )
-        } else null
-        if (boundary != null) {
-            compactionInProgress = true
-            val oldMessages = history.subList(compactedMessageCount.coerceIn(0, boundary), boundary)
-            val summaryInput = ConversationCompactor.summarizationMessages(oldMessages, contextSummary)
-            client.summarize(profile, mode == Mode.PLAN, summaryInput, (window!! * 0.12).toInt()) { result ->
-                ApplicationManager.getApplication().invokeLater {
-                    compactionInProgress = false
-                    if (currentChatId != chatIdForCompaction || !streaming) return@invokeLater
-                    if (currentChatId != null && history.size < boundary) return@invokeLater
-                    result.fold(
-                        onSuccess = { summary ->
-                            contextSummary = summary
-                            compactedMessageCount = boundary
-                            compactionFailedForCurrentTurn = true // at most one compaction attempt per user turn
-                            persistChat()
-                            appendSystem("ℹ Older conversation turns were compacted into a summary for future model requests; the full chat transcript is unchanged.")
-                            lastPromptTokens = 0
-                        },
-                        onFailure = { error ->
-                            LOG.warn("TellForgeAI conversation compaction failed; using normal history trimming", error)
-                            // Fall back to standard trimming rather than retrying this failed summary.
-                            compactionFailedForCurrentTurn = true
-                            lastPromptTokens = 0
-                        },
-                    )
-                    startTurn()
-                }
-            }
-            return
-        }
-        val summarizedMessages = ConversationCompactor.applySummary(
-            system, history, contextSummary, compactedMessageCount,
-        )
-        val originalMessages = summarizedMessages
-        val budget = tokenBudget(profile)
-        val messages = if (budget != null) {
-            val fitted = HistoryTrimmer.fit(originalMessages, budget)
-            if (ContextGuard.wasTrimmed(originalMessages, fitted)) contextTrimNotice(fitted.size, originalMessages.size)
-            fitted
-        } else {
-            originalMessages
-        }
-        lastAssistantMarkdown = StringBuilder()
-        lastReasoning = StringBuilder()
-        client.stream(profile, mode == Mode.PLAN, messages, ToolRegistry.specs(project, mode == Mode.PLAN)) { event ->
-            // invoked on a background thread; marshal UI updates to the EDT
-            ApplicationManager.getApplication().invokeLater {
-                if (!streaming) return@invokeLater // user pressed Stop; ignore late events
-                when (event) {
-                    is LlmClient.Event.Delta -> appendAssistantDelta(event.text)
-                    is LlmClient.Event.Reasoning -> appendReasoningDelta(event.text)
-                    is LlmClient.Event.Done -> onTurnDone(event)
-                    is LlmClient.Event.Error -> {
-                        finishAssistantBlock()
-                        appendSystem("Error: ${event.message}")
-                        setStreaming(false)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun onTurnDone(event: LlmClient.Event.Done) {
-        event.usage?.let { usage ->
-            lastPromptTokens = usage.promptTokens
-            val chat = currentChatId?.let { TellForgeAIChatsState.getInstance(project).get(it) }
-            if (chat != null) {
-                val usedModel = TellForgeAIProjectState.getInstance(project).selectedProfile()?.modelFor(mode == Mode.PLAN).orEmpty()
-                if (chat.contextModel.isBlank()) chat.contextModel = usedModel
-                else if (usedModel.isNotBlank() && chat.contextModel != usedModel) chat.mixedModelsUsage = true
-                chat.incomingTokens += usage.promptTokens.coerceAtLeast(0).toLong()
-                chat.cachedInputTokens += (usage.cachedPromptTokens ?: 0).coerceIn(0, usage.promptTokens.coerceAtLeast(0)).toLong()
-                chat.outgoingTokens += usage.completionTokens.coerceAtLeast(0).toLong()
-                TellForgeAIChatsState.getInstance(project).upsert(chat)
-            }
-            updateStickyHeader()
-        }
-        // Near-full warning, once per chat: even with trimming, exploding
-        // history (huge tool outputs, giant pastes) can approach the window.
-        if (event.usage != null && !contextTrimNotified) {
-            val profile = TellForgeAIProjectState.getInstance(project).selectedProfile()
-            val window = contextWindow(profile)
-            if (window != null && ContextGuard.nearFull(event.usage.promptTokens, window)) {
-                contextTrimNotified = true
-                appendSystem(
-                    "⚠ Context is nearly full (${event.usage.promptTokens} / $window tokens). " +
-                        "Long-term accuracy degrades past this point — consider starting a new chat."
-                )
-            }
-        }
-        if (event.toolCalls.isEmpty()) {
-            // Plain final answer.
-            finishAssistantBlock()
-            if (event.fullText.isNotBlank()) history += ChatMessage.assistant(event.fullText)
-            persistChat()
-            setStreaming(false)
-            markTurnComplete()
-            return
-        }
-        // Loop guard: a model that keeps requesting tools would otherwise loop
-        // (and re-send the whole history each round) indefinitely.
-        if (toolRounds >= MAX_TOOL_ROUNDS) {
-            finishAssistantBlock()
-            appendSystem("Stopped after $MAX_TOOL_ROUNDS tool rounds to avoid an endless loop. " +
-                "Press Send to let it continue.")
-            if (event.fullText.isNotBlank()) history += ChatMessage.assistant(event.fullText)
-            history += ChatMessage.user(
-                "Tool loop stopped after $MAX_TOOL_ROUNDS rounds. Summarize what you have and give a final answer now."
-            )
-            persistChat()
-            setStreaming(false)
-            markTurnComplete()
-            return
-        }
-        toolRounds++
-        // Defensive guard: some providers (e.g. GLM on deepinfra) occasionally
-        // finish a tool call with a blank function name (arguments intact).
-        // Executing it would return "unknown tool ''" and the model would retry
-        // the same broken call until the round limit — surface it and stop here.
-        val nameless = event.toolCalls.filter { it.name.isBlank() }
-        if (nameless.isNotEmpty()) {
-            LOG.warn(
-                "TellForgeAI: provider returned ${nameless.size} tool call(s) with a blank name; " +
-                    "arguments: ${nameless.joinToString("; ") { it.arguments.take(200) }} " +
-                    "(raw SSE deltas were logged by LlmClient)"
-            )
-            finishAssistantBlock()
-            appendSystem(
-                "Error: provider sent ${nameless.size} tool call(s) without a function name " +
-                    "(arguments: ${nameless.joinToString("; ") { it.arguments.take(80) }}). " +
-                    "The turn was stopped instead of retrying — see idea.log for the raw stream."
-            )
-            setStreaming(false)
-            markTurnComplete()
-            return
-        }
-        // Record the assistant's tool-call message, render each call, execute
-        // off-EDT, then feed the results back as the next turn.
-        if (event.fullText.isNotBlank()) {
-            finishedBlocks.add(bubble(
-                "${mode.label} · ${esc(profileLabel())}",
-                markdownToHtml(event.fullText), assistantBubbleBg,
-            ))
-        }
-        lastAssistantMarkdown = StringBuilder()
-        lastReasoning = StringBuilder()
-        history += ChatMessage.assistantWithToolCalls(event.fullText, event.toolCalls)
-        persistChat()
-
-        val calls = event.toolCalls
-        calls.forEach { appendToolPending(it) }
-        Thread {
-            try {
-                val results = calls.map { call ->
-                    val result = ToolRegistry.execute(
-                        project, call.name, call.arguments, mode == Mode.PLAN,
-                        onDownloadRequested = { request ->
-                            requestApproval("TellForgeAI wants to download a binary file:\n\n$request\n\nAllow?", "Download binary")
-                        },
-                        onCommandRequested = { command ->
-                            // If the user disabled the approval prompt, run without asking.
-                            if (!askPermissionCheckBox.isSelected) true
-                            else requestApproval("TellForgeAI wants to run this command:\n\n$command\n\nAllow?", "Run command")
-                        },
-                        // Always-on gate for instructions-repo commits+pushes: pushing
-                        // broadcasts the change to everyone sharing the repo, so the
-                        // diff is shown even when command approval is disabled.
-                        onCommitRequested = { diff ->
-                            requestApproval(
-                                "TellForgeAI wants to commit and push this change to the instructions repo:\n\n$diff",
-                                "Push instructions change",
-                            )
-                        },
-                    )
-                    call to result
-                }
-                ApplicationManager.getApplication().invokeLater {
-                    for ((call, result) in results) {
-                        appendToolResult(call, result)
-                        // Truncate what goes back to the model: a huge tool result
-                        // would otherwise be re-sent on every subsequent turn.
-                        history += ChatMessage.toolResult(call.id, result.take(MAX_TOOL_RESULT_CHARS))
-                    }
-                    persistChat()
-                    if (streaming) {
-                        // The previous stream's job may still be finishing when Done
-                        // was delivered; defer until the client is actually idle so
-                        // stream()'s isRunning() guard doesn't drop this turn.
-                        client.whenIdle {
-                            ApplicationManager.getApplication().invokeLater {
-                                if (streaming) startTurn()
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                // Never leave the panel stuck in "Thinking" if tool execution blows up.
-                ApplicationManager.getApplication().invokeLater {
-                    appendSystem("Tool execution failed: ${e.message ?: e.javaClass.simpleName}")
-                    setStreaming(false)
-                }
-            }
-        }.start()
-    }
+    /**
+     * Per-request prompt-token budget: detected/known context window minus a
+     * reserve for the answer. null when no window is known — in that case
+     * history is sent untrimmed.
+     */
 
     /**
      * Per-request prompt-token budget: detected/known context window minus a
@@ -1278,13 +1385,6 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     /** Per-request prompt-token budget, null when no window is known. */
     private fun tokenBudget(profile: ProviderProfile): Int? =
         contextWindow(profile)?.let { it - ContextGuard.RESERVE_TOKENS }
-
-    /** Once-per-chat transcript note that older tool results/turns were trimmed. */
-    private fun contextTrimNotice(keptMessages: Int, totalMessages: Int) {
-        if (contextTrimNotified) return
-        contextTrimNotified = true
-        appendSystem(ContextGuard.trimNotice(totalMessages, keptMessages))
-    }
 
     /**
      * Compact project snapshot for the system prompt; built off-EDT, cached 60s.
@@ -1309,7 +1409,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
      * Instructions layer from the configured instructions repo, or "".
      * Cached in memory (never git on this path); triggers an async refresh.
      */
-    private fun instructionsLayer(project: Project): String {
+    private fun instructionsLayer(project: Project = this.project): String {
         val state = dev.tellforgeai.settings.InstructionsRepoState.getInstance(project)
         if (!state.enabled()) return ""
         val service = dev.tellforgeai.llm.InstructionsRepoService.getInstance(project)
@@ -1416,11 +1516,15 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     /** Stop button: abort the request/loop immediately and clear the "Thinking…" state. */
     private fun stop() {
-        if (!streaming) return
-        client.cancel()
+        val id = currentChatId ?: return
+        if (!runs.isRunning(id)) return
+        runs.stop(id)
         finishAssistantBlock()
         setStreaming(false)
-        appendSystem("Stopped.")
+        // No appendSystem here: the engine's onTurnEnded(stopped = true) callback
+        // is the single source of the "Stopped." notice; adding one on the panel
+        // side made the line appear twice.
+        refreshChatList()
     }
 
     private fun requestApproval(message: String, title: String): Boolean {
@@ -1449,18 +1553,16 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         inputArea.isEnabled = !s
         if (s) {
             thinkingDots = 0
-            completedMode = null
             thinkingTimer.start()
         } else {
             thinkingTimer.stop()
+            refreshChatList()
         }
     }
 
     /** Marks the just-finished turn as complete (green status line, mode-aware label). */
-    private fun markTurnComplete() {
-        completedMode = mode
-        repaintTranscript()
-    }
+    // (removed: turn-complete state now lives in the persisted ChatSession and
+    // is rendered from there — see endOfTurnLine() / the openChat() rebuild)
 
     // --- transcript rendering ---
 
@@ -1586,9 +1688,30 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         )
         // Waiting for the first streamed token: show an animated "Thinking…" status.
         streaming -> "<div class='mode' style='font-style:italic'>Thinking${".".repeat(thinkingDots)}</div>"
-        completedMode != null -> "<div class='mode' style='color:#3fb950;font-weight:bold'>" +
-            (if (completedMode == Mode.PLAN) "✓ Planning complete" else "✓ Task complete") + "</div>"
+        // Turn ended: status line keyed off the chat's PERSISTED last-turn
+        // status, so the live tail and the rebuilt transcript show the same
+        // marker ("✓ Task complete" survives reopening and IDE restarts).
+        currentChatId?.let {
+            TellForgeAIChatsState.getInstance(project).get(it)?.lastTurnStatus
+        }.takeIf { !it.isNullOrBlank() } != null ->
+            endOfTurnLine()
         else -> ""
+    }
+
+    /**
+     * End-of-turn marker HTML for the persisted [ChatSession.lastTurnStatus]
+     * of the currently open chat. Empty string when there's nothing to show.
+     */
+    private fun endOfTurnLine(): String {
+        val id = currentChatId ?: return ""
+        val chat = TellForgeAIChatsState.getInstance(project).get(id) ?: return ""
+        return when (chat.lastTurnStatus) {
+            "complete" -> "<div class='mode' style='color:#3fb950;font-weight:bold'>" +
+                (if (chat.lastTurnPlanMode) "✓ Planning complete" else "✓ Task complete") + "</div>"
+            "stopped" -> "<div class='mode'>Stopped.</div>"
+            "error" -> "<div class='mode' style='color:#f85149;font-weight:bold'>⚠ Last turn failed</div>"
+            else -> ""
+        }
     }
 
     /** Hides the tail pane entirely when there's nothing transient to show. */
@@ -2248,7 +2371,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             "Enter to send — Shift+Enter for a new line"
         /** Max tool request/execute/feedback rounds per user turn, before forcing a wrap-up. */
         private const val MAX_TOOL_ROUNDS = 200
-        /** Max characters of a tool result fed back into the model history. */
+        /** Per-request prompt-token reserve held back from the model's answer. */
         private const val MAX_TOOL_RESULT_CHARS = 8_000
     }
 }

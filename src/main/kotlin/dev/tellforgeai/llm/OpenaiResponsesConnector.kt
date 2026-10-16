@@ -72,7 +72,7 @@ class OpenaiResponsesConnector : LlmConnector {
         val body = buildJsonObject {
             put("model", model)
             put("stream", true)
-            put("input", JsonArray(history.flatMap { it.toInputItems() }))
+            put("input", JsonArray(sanitize(history.flatMap { it.toInputItems() })))
             profile.reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }?.let {
                 put("reasoning", buildJsonObject { put("effort", it) })
             }
@@ -218,6 +218,39 @@ class OpenaiResponsesConnector : LlmConnector {
                 currentCall = null
             }
         }
+    }
+
+    /**
+     * Drops `function_call_output` items whose `call_id` has no matching
+     * preceding `function_call` item. Such orphans make /v1/responses reject
+     * the whole request with HTTP 400 ("No tool call found for function call
+     * output with call_id …") and can still exist in chats persisted by older
+     * plugin versions — healing the input instead of failing the turn.
+     */
+    internal fun sanitize(items: List<JsonElement>): List<JsonElement> {
+        val knownCallIds = mutableSetOf<String>()
+        val out = ArrayList<JsonElement>(items.size)
+        var dropped = 0
+        for (item in items) {
+            val obj = item as? JsonObject
+            when (obj?.get("type")?.jsonPrimitive?.contentOrNull) {
+                "function_call" -> {
+                    obj?.get("call_id")?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { it.isNotBlank() }?.let { knownCallIds.add(it) }
+                    out.add(item)
+                }
+                "function_call_output" -> {
+                    val callId = obj?.get("call_id")?.jsonPrimitive?.contentOrNull.orEmpty()
+                    if (callId !in knownCallIds) {
+                        dropped++
+                        LOG.warn("TellForgeAI: dropping orphan function_call_output (call_id=$callId) from the request input")
+                    } else out.add(item)
+                }
+                else -> out.add(item)
+            }
+        }
+        if (dropped > 0) LOG.warn("TellForgeAI: dropped $dropped orphan function_call_output item(s) from history")
+        return out
     }
 
     /**

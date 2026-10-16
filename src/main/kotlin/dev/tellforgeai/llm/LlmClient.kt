@@ -267,6 +267,9 @@ class LlmClient {
             ?: return emptyList()
         entries.mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull }
             .filter { it.isNotBlank() }
+            // Every model dropdown (settings suggestions, chat panel) consumes this
+            // list — sorting once here keeps all of them in a stable order.
+            .sorted()
     } catch (_: Exception) {
         emptyList()
     }
