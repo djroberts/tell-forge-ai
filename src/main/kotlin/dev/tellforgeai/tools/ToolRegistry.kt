@@ -157,21 +157,25 @@ object ToolRegistry {
         ) else null,
         // Notion tools, gated by the per-project Notion integration.
         if (instructionsEnabled) spec(
-            "instructions_read",
-            "Read the user's AI instructions markdown (raw, with original section " +
+            "tellforge_instructions_read",
+            "Read the user's TellForge instructions (raw, with original section " +
                 "markers). Read-only, both modes, no approval. Call this before " +
                 "editing so you see original section markers.",
             jsonObjectProps(),
             required = listOf(),
         ) else null,
         if (instructionsEnabled && !planMode) spec(
-            "instructions_write",
-            "Edit the user's AI instructions: supply the COMPLETE new instructions " +
-                "text in [content] — it replaces the instructions wholesale. The API " +
+            "tellforge_instructions_write",
+            "Edit the user's TellForge instructions: supply the COMPLETE new " +
+                "instructions text in [content] — it replaces the instructions " +
+                "wholesale. When the user says 'update the TellForge instructions', " +
+                "use these tellforge_instructions_* tools. The instructions live OUTSIDE " +
+                "the project — never create or edit instruction files (AGENTS.md, " +
+                "INSTRUCTIONS.md, CLAUDE.md, etc.) in the user's project. The API " +
                 "shows the user a diff and, after approval, saves it. Forge mode only " +
                 "and requires the user's write opt-in — this never touches project " +
-                "files. Read the instructions with instructions_read first; keep " +
-                "edits focused. A commit message is optional.",
+                "files. Read the instructions with tellforge_instructions_read first; " +
+                "keep edits focused. A commit message is optional.",
             jsonObjectProps(
                 "content" to "The complete new instructions text.",
                 "message" to "Optional commit message (Conventional Commit style).",
@@ -484,13 +488,13 @@ object ToolRegistry {
                 else NotionTool.queryDatabase(project, args)
             "notion_describe_database" -> if (!notionAllowed(project)) notEnabled("notion_describe_database")
                 else NotionTool.describeDatabase(project, args)
-            "instructions_read" -> if (!instructionsAllowed(project)) notEnabled("instructions_read")
+            "tellforge_instructions_read" -> if (!instructionsAllowed(project)) notEnabled("tellforge_instructions_read")
                 else dev.tellforgeai.tools.InstructionsTool.read(project, args)
-            "instructions_write" -> when {
+            "tellforge_instructions_write" -> when {
                 planMode -> notAllowedInPlan(name)
                 !instructionsAllowed(project) -> notEnabled(name)
                 !dev.tellforgeai.settings.InstructionsRepoState.getInstance(project).writeEnabled() ->
-                    "Error: 'instructions_write' requires the user's write opt-in in the " +
+                    "Error: 'tellforge_instructions_write' requires the user's write opt-in in the " +
                         "'Configure Instructions Repo' dialog (Config button in the tool window)."
                 else -> dev.tellforgeai.tools.InstructionsTool.write(
                     project, args,

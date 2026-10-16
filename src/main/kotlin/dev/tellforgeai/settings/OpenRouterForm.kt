@@ -20,7 +20,7 @@ class OpenRouterForm(
     // ── Provider routing ──
     private val providerOrderField = JBTextField()
     private val allowFallbacksCheck = JCheckBox("Allow fallbacks")
-    private val providerSortCombo = JComboBox(arrayOf("", "price", "throughput", "latency"))
+    private val providerSortCombo = JComboBox(arrayOf("", "latency", "price", "throughput"))
     private val providerIgnoreField = JBTextField()
     private val providerOnlyField = JBTextField()
     private val quantizationsField = JBTextField()

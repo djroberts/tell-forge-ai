@@ -36,8 +36,20 @@ data class ChatSession(
     var pricingModel: String = "",
     var pricingCheckedAt: Long = 0,
     var contextModel: String = "",
+    /** Provider profile id used for this chat's turns; empty = project default. */
+    var providerProfileId: String = "",
+    /** Display name of [providerProfileId], cached for the overview list. */
+    var providerName: String = "",
+    /** Persisted Foretell/Forge mode for this chat ("plan" or "act"). */
+    var mode: String = "",
     /** True if this chat accumulated token usage under more than one model. */
     var mixedModelsUsage: Boolean = false,
+    /** Status of the chat's last finished turn: "complete" | "stopped" | "error",
+     *  "" while running / before the first turn. Rendered as the end-of-turn
+     *  marker in the transcript and the overview "complete" indicator. */
+    var lastTurnStatus: String = "",
+    /** Whether that last turn ran in Foretell (plan) mode, for the marker label. */
+    var lastTurnPlanMode: Boolean = false,
 ) {
     companion object {
         fun new(title: String): ChatSession {

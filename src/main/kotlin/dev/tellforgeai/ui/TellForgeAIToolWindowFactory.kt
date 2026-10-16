@@ -8,19 +8,26 @@ import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.content.ContentFactory
+import javax.swing.JTextArea
 
 class TellForgeAIToolWindowFactory : ToolWindowFactory {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val contentFactory = ContentFactory.getInstance()
-        val chat = ChatPanel(project)
+        val chat = try {
+            ChatPanel(project)
+        } catch (e: Throwable) {
+            com.intellij.openapi.diagnostic.Logger.getInstance(TellForgeAIToolWindowFactory::class.java)
+                .error("TellForgeAI: ChatPanel construction failed", e)
+            JTextArea().apply { text = "ChatPanel failed to build: $e" }
+        }
         val instructions = InstructionsPanel(project)
         with(toolWindow.contentManager) {
             addContent(contentFactory.createContent(chat, "Chat", false))
             addContent(contentFactory.createContent(instructions, "Instructions", false))
         }
         // Pick up content changes written behind our back (e.g. the agent
-        // pushing instructions_write results, or the Test button in the config
+        // pushing tellforge_instructions_write results, or the Test button in the config
         // dialog) when the user flips to this tab.
         toolWindow.contentManager.addContentManagerListener(object :
             com.intellij.ui.content.ContentManagerListener {
