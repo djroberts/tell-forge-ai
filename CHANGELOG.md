@@ -4,6 +4,26 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [0.10.0] - 2026-10-16
+
+### Fixed
+- Attachment blocks (file/image/video/pdf) could not be deleted by the agent: `notion_read_page` only emitted `(block_id: …)` markers for text blocks, so the model had no block id to target and wrongly concluded Notion's API cannot delete files. Attachment block ids are now included in the markers (with the file name/caption shown next to `[file]`/`[image]` lines), and `notion_update_block` docs/state clarify that attachments are deletable with `archive=true` (`fix(tools)`)
+
+### Added
+- Text-extension fallback for Notion uploads: when a file's bytes are plain text but its extension is one Notion's File Upload API rejects (`.asc`, `.log`, `.conf`, …), the upload is sent under a Notion-friendly name with the original extension embedded as a suffix (`foo.asc` → `foo_asc.txt`, content type `text/plain`, result message notes the rename); extensions Notion already accepts are never renamed (`feat(tools)`)
+- `notion_move_file` tool: moves a file-attachment or image block between Notion pages by downloading it to a temp file (explicitly deleted when the call ends, success or failure), re-uploading via the File Upload API, attaching to the target page and archiving the original block last; external-URL attachments are moved by re-embedding the URL with no download. The Notion API cannot re-parent file blocks, so this is an explicit copy-then-delete (`feat(tools)`)
+- Duplicate-page guard for Notion and tela wiki writes: `notion_write_page` refuses to create a page when one with the same or a near-identical title (stripped of trailing "2"/"(copy)"/"notes" qualifiers) already exists, and `wiki_write_page` does the same on create, pointing the model to `notion_append_blocks`/`notion_update_block` (or replacing the tela page) instead (`feat(tools)`)
+
+### Changed
+- Tool descriptions and search-output hints now push "look before you create": `notion_search`/`wiki_search` results remind the model to check for existing pages, `notion_write_page` requires a search first, `notion_append_blocks` is marked as the preferred write tool, and `wiki_write_page` explains that an existing title replaces the page body in one shot (`feat(tools)`)
+
+## [0.9.0]
+
+### Changed
+- `instructions_write` no longer exposes a `path` argument to the model: the AI instructions are presented as a single document — no repo, no file names, no directory layout in any tool description or tool output. Legacy calls still passing a `path` fail with an explanatory error unless they target the canonical file, and the mutating service layer rejects any path other than the canonical `INSTRUCTIONS.md` as tooling-level enforcement (`fix(tools)`).
+
 ## [0.8.0] - 2026-10-18
 
 ### Fixed
