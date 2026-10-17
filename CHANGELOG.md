@@ -4,6 +4,19 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.14.0] - 2026-10-31
+
+### Added
+- Read-only mode now permits simple pipelines into pure readers (`head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `column`, `tac`, `rev`), e.g. `grep -n "foo" file | head -20`; quotes are respected so literal pipes inside `"a|b"` are not treated as operators (tools)
+
+### Fixed
+- Shell `$(...)` command substitution is now blocked as intended; it was previously accepted by the metacharacter filter (tools)
+
+## [0.13.1] - 2026-10-31
+
+### Fixed
+- Brave Search API key field in settings is now editable whenever Brave can actually be used: with DuckDuckGo as the primary provider plus fallback enabled, the key could previously not be entered, making the fallback-to-Brave path unusable (settings)
+
 ## [0.13.0] - 2026-10-31
 
 ### Added

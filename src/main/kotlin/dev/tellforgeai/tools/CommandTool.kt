@@ -58,8 +58,102 @@ object CommandTool {
         "taskkill", "remove-item", "ri ", "set-itemproperty",
     )
 
-    /** Matches metacharacters not escaped with a backslash (escaped ones are literals, safe). */
-    private val UNESCAPED_META = Regex("""(?<!\\)[|;&`>|]""")
+    /**
+     * Matches metacharacters not escaped with a backslash (escaped ones are literals,
+     * safe): pipes, semicolons, ampersands, backticks, redirects and `$(` command
+     * substitution. `$(` is expanded even inside double quotes, so it is checked on
+     * the raw segment as well as the quote-stripped copy.
+     */
+    private val UNESCAPED_META = Regex("""(?<!\\)([|;&`>]|\$\()""")
+
+    /**
+     * Pipeline tail commands that are pure readers (or non-destructive filters) and are
+     * therefore allowed after an unescaped pipe in read-only mode. Deliberately excludes
+     * awk/sed (both can write: awk `system()`, `sed -i`).
+     */
+    private val SAFE_PIPE_TAIL = Regex("""^(head|tail|wc|sort|uniq|cut|column|tac|rev)\b""")
+
+    /**
+     * Splits [command] into pipeline segments on unescaped, unquoted `|`, respecting
+     * single/double quotes and backslash escapes so string literals like `"a|b"` are
+     * never treated as operators.
+     */
+    internal fun splitPipeline(command: String): List<String> {
+        val segments = mutableListOf<String>()
+        val sb = StringBuilder()
+        var inSingle = false
+        var inDouble = false
+        var escaped = false
+        for (c in command) {
+            when {
+                escaped -> { sb.append(c); escaped = false }
+                c == '\\' && !inSingle -> { sb.append(c); escaped = true }
+                c == '\'' && !inDouble -> { inSingle = !inSingle; sb.append(c) }
+                c == '"' && !inSingle -> { inDouble = !inDouble; sb.append(c) }
+                c == '|' && !inSingle && !inDouble -> { segments.add(sb.toString().trim()); sb.clear() }
+                else -> sb.append(c)
+            }
+        }
+        segments.add(sb.toString().trim())
+        return segments
+    }
+
+    /**
+     * Validates a read-only (Foretell) command. Allows pipelines whose first stage is a
+     * read-only prefix command and whose tail stages are safe readers ([SAFE_PIPE_TAIL]).
+     * Redirects [> >>], command substitution [` $(`], chaining [; &] and forbidden
+     * commands are still refused in every segment. Returns null when the command is
+     * acceptable, otherwise a rejection message.
+     */
+    internal fun readOnlyRejection(command: String): String? {
+        val segments = splitPipeline(command)
+        if (segments.firstOrNull()?.let { !isReadOnlyCommand(it) } == true) {
+            return planModeRejection(command)
+        }
+        val unescapedSegments = segments.map { it.replace(Regex("""\\(.)"""), "$1") }
+        for (segment in unescapedSegments) {
+            val lowered = segment.lowercase()
+            FORBIDDEN.firstOrNull { lowered.contains(it) }?.let {
+                return "Error: command refused ('$command' was NOT executed): contains forbidden " +
+                    "command '$it'. Use the dedicated tools instead: search_files (search " +
+                    "contents/names), read_file, list_files. Do not retry variations of this command."
+            }
+            // Quoted substrings are literals ("a|b"), strip them before the meta check.
+            val outsideQuotes = stripQuotes(segment)
+            // Any metacharacter other than the pipes we split on is unsafe.
+            UNESCAPED_META.find(outsideQuotes)?.let { m ->
+                return redirectBlock(command, m.value)
+            }
+        }
+        if (segments.size > 1) {
+            tails@ for (tail in segments.drop(1).map { it.trimStart() }) {
+                if (!SAFE_PIPE_TAIL.containsMatchIn(tail)) {
+                    // Empty or non-allowlisted tail: fall back to the general block so the
+                    // model understands the pipeline itself was the problem.
+                    return redirectBlock(command, "|")
+                }
+            }
+        }
+        return null
+    }
+
+    /** Removes single- and double-quoted substrings (replaces with spaces) from [segment]. */
+    private fun stripQuotes(segment: String): String =
+        Regex("""'[^']*'|"[^"]*"""").replace(segment, " ")
+
+    private fun redirectBlock(command: String, op: String): String =
+        "Blocked: '$op' is not allowed" +
+            (if (op == "|") " in this position. Only pipelines into pure readers are allowed " +
+                "in read-only mode: | head, | tail, | wc, | sort, | uniq, | cut. "
+            else " (redirects, command substitution and compound commands are always refused). ") +
+            "The command '$command' was NOT executed.\n" +
+            "Instead:\n" +
+            "  - Search file contents/names -> search_files(query=\"...\", path=\"...\") " +
+            "(one call per term; calls can be made in parallel)\n" +
+            "  - Read a file with line numbers -> read_file(path=\"...\")\n" +
+            "  - Explore structure -> list_files(path=\"...\")\n" +
+            "A plain single command without operators is fine. Do not retry variations of " +
+            "this command."
 
     fun run(
         project: Project,
@@ -69,11 +163,9 @@ object CommandTool {
     ): String {
         val command = VfsTools.str(args, "command")?.trim()
             ?: throw IllegalArgumentException("command required")
-        if (planMode && !isReadOnlyCommand(command)) {
-            return planModeRejection(command)
+        if (planMode) {
+            readOnlyRejection(command)?.let { return it }
         }
-        // Strip escaped metacharacters (\| \; \& \` \$ etc. are literals in shell/regex,
-        // not operators), then check for real injection patterns.
         val unescaped = command.replace(Regex("""\\(.)"""), "$1")
         // Case-insensitive on purpose: Windows commands are case-insensitive
         // (DEL/del, REG ADD/reg add…), and the list is stored lowercase.
@@ -84,15 +176,7 @@ object CommandTool {
         }
         UNESCAPED_META.find(unescaped)?.let { m ->
             val op = m.value
-            return "Blocked: '$op' is not allowed, even for read-only commands " +
-                "(pipes, redirects, command substitution and compound commands are always refused). " +
-                "Instead:\n" +
-                "  - Search file contents/names -> search_files(query=\"...\", path=\"...\") " +
-                "(one call per term; calls can be made in parallel)\n" +
-                "  - Read a file with line numbers -> read_file(path=\"...\")\n" +
-                "  - Explore structure -> list_files(path=\"...\")\n" +
-                "A plain single command without operators is fine. Do not retry variations of " +
-                "this command."
+            return redirectBlock(command, op)
         }
         if (!onCommandRequested(command)) return "Command declined by user."
         val timeoutSeconds = TellForgeAISettings.getInstance().commandTimeoutSeconds().toLong()

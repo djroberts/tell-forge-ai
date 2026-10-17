@@ -18,7 +18,8 @@ per-project provider/model dropdown**.
 - **Project context & tools**: every request includes a project snapshot (name,
   root, git branch, directory tree), and the model can call tools — `list_files`,
   `read_file`, `search_files`, and `run_command` (always user-approved; in Foretell
-  mode restricted to read-only commands) — in an agentic loop, so it can explore
+  mode restricted to read-only commands, with simple pipelines into pure readers
+   like `cmd | head -20` or `| wc -l` also allowed) — in an agentic loop, so it can explore
   the project before answering. In Forge mode, `download_binary` can fetch an HTTPS
   resource as raw bytes into the project after explicit approval (up to 50 MiB).
 - **Automatic context compaction**: when a known context window reaches 80% usage, older completed turns are summarized for future requests. The full transcript remains in chat history; ordinary history trimming is used if summarization fails.

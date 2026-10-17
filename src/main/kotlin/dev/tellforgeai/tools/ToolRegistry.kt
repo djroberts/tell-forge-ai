@@ -79,10 +79,13 @@ object ToolRegistry {
                 "MUTATIONS ARE ALLOWED in Forge mode when the user asks for them: " +
                 "git add/commit/push, npm install, gradle build, git config and similar " +
                 "state-changing commands run fine as single commands. " +
-                "NEVER use pipes (|), redirects (>, >>, 2>&1), command substitution (\$(...), " +
-                "backticks) or compound commands (;, &&, ||) — these are always refused even for " +
-                "read-only commands. You do NOT need '2>&1': BOTH stdout and stderr are captured " +
-                "automatically and returned together (stderr is labeled '[stderr]'), so plain " +
+                "NEVER use redirects (>, >>, 2>&1), command substitution (\$(...), backticks) " +
+                "or compound commands (;, &&, ||) — these are always refused. " +
+                "In Foretell mode simple pipelines into pure readers ARE allowed: " +
+                "grep -n \"foo\" file | head -20, git log --oneline | wc -l, cat f | sort. " +
+                "Allowed tail commands: head, tail, wc, sort, uniq, cut, column, tac, rev. " +
+                "No awk/sed/sed -i. You do NOT need '2>&1': BOTH stdout and stderr are " +
+                "captured and returned together (stderr is labeled '[stderr]'), so plain " +
                 "output redirection only discards information.\n" +
                 "Run a single simple command instead; if you need grep-like output " +
                 "filtering, use search_files or read_file rather than 'grep ... | head'.\n" +
@@ -91,8 +94,9 @@ object ToolRegistry {
                 "instead of asserting tool restrictions from memory.\n" +
                 "Destructive commands (rm, sudo, force-push) still need explicit user request.",
             jsonObjectProps("command" to "The shell command to execute. A single plain command — " +
-                "no pipes, redirects (including 2>&1), or chaining. stdout and stderr are both " +
-                "returned automatically."),
+                "no redirects (including 2>&1) or chaining; pipes into pure readers " +
+                "(head/tail/wc/sort/uniq/cut) are permitted in read-only mode. stdout and " +
+                "stderr are both returned automatically."),
             required = listOf("command"),
         ),
         spec(

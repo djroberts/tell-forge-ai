@@ -55,8 +55,12 @@ object Prompts {
         |  etc.). read_file on such a path fails and listings/searches omit it — do not
         |  conclude a file "doesn't exist"; ask the user if you really need it.
         |- run_command is a last resort for things no dedicated tool does (git, npm, etc.).
-        |  It must be a SINGLE plain command: pipes (|), redirects (> >> 2>&1), command
+        |  It must be a SINGLE plain command: redirects (> >> 2>&1), command
         |  substitution ($(...)) and chaining (;, &&) are always refused and will error.
+        |  In read-only mode, simple pipelines into pure readers ARE allowed:
+        |  `grep -n "foo" file | head -20`, `git log --oneline | wc -l`. Allowed tails:
+        |  head, tail, wc, sort, uniq, cut, column, tac, rev. No awk/sed. Pipelines into
+        |  other commands, or any redirect/substitution/chain, are refused.
         |  Never add '2>&1' — stdout and stderr are both captured and returned
         |  automatically, so appending redirects is always a mistake.
         |  Mutations (git add/commit/push, npm install, gradle build) ARE allowed in Forge

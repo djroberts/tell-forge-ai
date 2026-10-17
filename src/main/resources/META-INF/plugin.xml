@@ -25,8 +25,9 @@
       Credential Manager or the Linux keyring) — never in plain-text settings files</li>
       <li>In Foretell (plan) mode only read-only commands are permitted</li>
       <li>Terminal command execution requires explicit user approval by default
-      (toggleable); pipes, redirects, command substitution and compound commands
-      are always refused</li>
+      (toggleable); redirects, command substitution and compound commands are always
+      refused. In read-only mode simple pipelines into pure readers (head, tail, wc,
+      sort, uniq, cut) are allowed</li>
     </ul>
     ]]></description>
     <depends>com.intellij.modules.platform</depends>
