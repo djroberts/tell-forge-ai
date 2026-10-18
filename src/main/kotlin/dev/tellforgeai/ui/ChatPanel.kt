@@ -932,6 +932,15 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
         turnEndedLive = false
         rebuildTranscript()
+        // Reopening a chat shows its latest messages, not the top: re-pin the
+        // viewport to the bottom after the transcript document has relaid out.
+        // A second deferred pass covers tall content whose layout settles after
+        // the first invokeLater (same technique as the streaming re-pin timer).
+        val pinnedRequest = scrollRequest
+        scrollToBottom()
+        SwingUtilities.invokeLater {
+            if (scrollRequest == pinnedRequest) scrollToBottom()
+        }
         (profileCombo.selectedItem as? ProviderProfile)?.let { ensureModelInfo(it) }
         updateStickyHeader()
         // Reopen a running chat live: bind its engine's buffered stream again.

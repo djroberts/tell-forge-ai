@@ -4,6 +4,11 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.14.1] - 2026-10-31
+
+### Fixed
+- Reopening an existing chat now scrolls the transcript to the bottom so the latest messages are visible instead of the top of the conversation (ui)
+
 ## [0.14.0] - 2026-10-31
 
 ### Added
