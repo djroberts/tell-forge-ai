@@ -4,6 +4,11 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.0] - 2026-10-31
+
+### Added
+- In-chat transcript search: ⌘F (macOS) / Ctrl+F (Windows/Linux) opens a collapsible find bar when the TellForgeAI tool window is focused; matches are live-debounced and case-insensitive over the transcript text, with a counter, wrap-around next/previous via Enter / ⌘G and Shift+Enter / Shift+⌘G, Escape to close; the bar closes on returning to the chat overview and rescans automatically as new messages stream in (ui)
+
 ## [0.14.1] - 2026-10-31
 
 ### Fixed

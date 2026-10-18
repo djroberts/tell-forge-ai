@@ -230,6 +230,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     // --- Center / bottom ---
     private val cards = JPanel(CardLayout())
+    /** Collapsible find bar over the transcript; see ChatFindBar. Created in init. */
+    private lateinit var findBar: ChatFindBar
     /** Finished transcript: blocks inserted incrementally, never reparsed wholesale. */
     private val transcriptPane = JEditorPane()
     /** Transient tail (streaming bubble / status lines) — re-rendered per tick, cheap. */
@@ -759,6 +761,17 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             add(homeBottomWithImages, BorderLayout.SOUTH)
         }
         /**
+         * Collapsible find bar for the transcript (⌘F / Ctrl+F, ⌘G navigation).
+         * Hidden by default; sits along the top edge of the chat card so it
+         * never shifts the sticky header or the input row.
+         */
+        findBar = ChatFindBar(
+            transcriptPane = transcriptPane,
+            scrollPane = chatScroll,
+            onClose = { },
+        )
+
+        /**
          * Provider selector lives INSIDE the chat card (shown only when a chat
          * is open). Each chat remembers its provider ([ChatSession.providerProfileId]);
          * switching here changes this chat only.
@@ -775,6 +788,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
         val chatCard = JPanel(BorderLayout()).apply {
             add(chatHead, BorderLayout.NORTH)
+            add(findBar, BorderLayout.BEFORE_FIRST_LINE)
             add(center, BorderLayout.CENTER)
             add(bottomWithImages, BorderLayout.SOUTH)
         }
@@ -785,6 +799,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         add(cards, BorderLayout.CENTER)
         preferredSize = Dimension(480, 600)
 
+        installSearchShortcuts()
+
         refreshProfiles()
         showHome()
         (profileCombo.selectedItem as? ProviderProfile)?.let { ensureModelInfo(it) }
@@ -794,6 +810,45 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun showCard(name: String) {
         (cards.layout as CardLayout).show(cards, name)
+    }
+
+    /**
+     * Installs ⌘F / Ctrl+F (open find), ⌘G / Ctrl+G (next match) and
+     * Shift+⌘G / Shift+Ctrl+G (previous match) on this panel, so they fire only
+     * when a component of THIS tool window has focus. Not wired when the chat
+     * card is hidden (home screen) — find still opens but does nothing visible.
+     */
+    private fun installSearchShortcuts() {
+        val inputMap = getInputMap(WHEN_IN_FOCUSED_WINDOW)
+        val actionMap = getActionMap()
+        fun bind(stroke: KeyStroke, key: String, action: () -> Unit) {
+            inputMap.put(stroke, key)
+            actionMap.put(key, object : AbstractAction() {
+                override fun actionPerformed(e: ActionEvent) = action()
+            })
+        }
+        // Open/find-focus: Cmd+F on macOS, Ctrl+F on Windows/Linux.
+        val isMac = com.intellij.openapi.util.SystemInfoRt.isMac
+        val findModifier = if (isMac) KeyEvent.META_DOWN_MASK else KeyEvent.CTRL_DOWN_MASK
+        bind(KeyStroke.getKeyStroke(KeyEvent.VK_F, findModifier), FIND_OPEN_KEY) { openFind() }
+
+        // Next/previous match: Cmd/Ctrl+G and Shift+Cmd/Ctrl+G.
+        bind(KeyStroke.getKeyStroke(KeyEvent.VK_G, findModifier), FIND_NEXT_KEY) { findNext() }
+        bind(KeyStroke.getKeyStroke(KeyEvent.VK_G, findModifier or KeyEvent.SHIFT_DOWN_MASK), FIND_PREV_KEY) { findPrevious() }
+    }
+
+    /** Opens (or re-focuses) the transcript find bar. */
+    private fun openFind() {
+        findBar.open()
+    }
+
+    /** Jumps to the next (or, with [delta] = -1, previous) search match. */
+    private fun findNext() {
+        if (findBar.isVisible) findBar.next()
+    }
+
+    private fun findPrevious() {
+        if (findBar.isVisible) findBar.previous()
     }
 
     /** Shows the home screen listing all chats; the default view when no chat is chosen. */
@@ -813,6 +868,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         lastAssistantMarkdown = StringBuilder()
         lastReasoning = StringBuilder()
         streamingHeader = ""
+        findBar.close()
         refreshChatList()
         showCard(CARD_HOME)
     }
@@ -1012,6 +1068,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         streamingHeader = ""
         turnEndedLive = false
         chatList.clearSelection()
+        findBar.close()
         rebuildTranscript()
         inputArea.text = ""
         updateStickyHeader()
@@ -1692,6 +1749,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         tailPaneVisible()
         if (wasNearBottom) scrollToBottom()
         updateStickyHeader()
+        findBar.invalidateMatches()
     }
 
     /** Number of finished blocks already inserted into the live document. */
@@ -1781,6 +1839,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         // Rebuilds happen when opening/restoring a chat or starting a fresh one:
         // always show the beginning, after Swing has recalculated the document layout.
         val request = ++scrollRequest
+        findBar.invalidateMatches()
         SwingUtilities.invokeLater {
             if (request == scrollRequest) {
                 chatScroll.viewport.viewPosition = java.awt.Point(0, 0)
@@ -2394,6 +2453,9 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         private const val CARD_HOME = "home"
         private const val CARD_CHAT = "chat"
         private const val SEND_ACTION_KEY = "tellforgeai.send"
+        private const val FIND_OPEN_KEY = "tellforgeai.find.open"
+        private const val FIND_NEXT_KEY = "tellforgeai.find.next"
+        private const val FIND_PREV_KEY = "tellforgeai.find.prev"
         private const val ENTER_TO_SEND_TIP =
             "Enter to send — Shift+Enter for a new line"
         /** Max tool request/execute/feedback rounds per user turn, before forcing a wrap-up. */
