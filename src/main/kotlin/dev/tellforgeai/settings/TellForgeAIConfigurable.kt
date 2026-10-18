@@ -114,15 +114,19 @@ class TellForgeAIConfigurable : Configurable {
             }
         )
         braveKeyField.document.addDocumentListener(SimpleDocListener { if (!suppressFieldListeners) modified = true })
-        // Single listener: toggles the Brave-key field's enabled state and marks
-        // the form modified — previously two separate addActionListener calls.
+        // The Brave key is usable whenever Brave can actually be attempted:
+        // as the primary, or as the fallback target when fallback is on.
         webSearchProviderCombo.addActionListener {
             if (suppressFieldListeners) return@addActionListener
             modified = true
-            braveKeyField.isEnabled = webSearchProviderCombo.selectedItem == "brave"
+            updateBraveKeyFieldState()
+        }
+        webSearchFallbackCheckBox.addActionListener {
+            if (suppressFieldListeners) return@addActionListener
+            modified = true
+            updateBraveKeyFieldState()
         }
         pastedImageSizeCombo.addActionListener { if (!suppressFieldListeners) modified = true }
-        webSearchFallbackCheckBox.addActionListener { if (!suppressFieldListeners) modified = true }
         aiPricingLookupCheckBox.addActionListener { if (!suppressFieldListeners) modified = true }
         // API protocol: switching swaps the base-url default and toggles the
         // OpenRouter-specific options panel but never discards the user's URL.
@@ -232,6 +236,26 @@ class TellForgeAIConfigurable : Configurable {
         override fun changedUpdate(e: javax.swing.event.DocumentEvent?) = onChange()
     }
 
+    /**
+     * Single source of truth for the Brave-key field's enabled state: usable
+     * whenever Brave can actually be attempted — as the primary provider, or
+     * as the fallback target when "Fallback to the other provider" is on
+     * (previously the field was gated on the primary alone, so with duckduckgo
+     * as primary the fallback-to-Brave path had no way to receive a key).
+     * Call after any change to the provider combo or the fallback checkbox,
+     * and after programmatic state loads.
+     */
+    private fun updateBraveKeyFieldState() {
+        val primary = webSearchProviderCombo.selectedItem == "brave"
+        val fallback = webSearchFallbackCheckBox.isSelected
+        braveKeyField.isEnabled = primary || fallback
+        braveKeyField.toolTipText = when {
+            primary -> "Used for every Brave search (primary provider)"
+            fallback -> "Used when the search falls back to Brave (primary is duckduckgo)"
+            else -> "Enable fallback, or select brave as the primary provider, to use a Brave API key"
+        }
+    }
+
     override fun getDisplayName(): String = "TellForgeAI Providers"
 
     override fun createComponent(): JComponent {
@@ -279,7 +303,7 @@ class TellForgeAIConfigurable : Configurable {
         center.add(labeled("Command timeout in seconds (5–600, applies to terminal tool; global)", timeoutField))
         center.add(labeled("Web search provider (duckduckgo = keyless; brave = requires API key; global)", webSearchProviderCombo))
         center.add(webSearchFallbackCheckBox)
-        center.add(labeled("Brave Search API key (only used when provider is brave; stored in PasswordSafe; global)", braveKeyField))
+        center.add(labeled("Brave Search API key (used when provider is brave, including as fallback; stored in PasswordSafe; global)", braveKeyField))
         center.add(aiPricingLookupCheckBox)
         center.add(labeled("Max pasted image size in px (longest side; Original = no resize; global)", pastedImageSizeCombo))
         aiPricingLookupCheckBox.addActionListener { modified = true }
@@ -303,9 +327,11 @@ class TellForgeAIConfigurable : Configurable {
         timeoutField.text = s.commandTimeoutSeconds().toString()
         val provider = s.webSearchProvider().lowercase()
         webSearchProviderCombo.selectedItem = if (provider == "brave") "brave" else "duckduckgo"
-        braveKeyField.text = ApiKeyStore.get(ApiKeyStore.BRAVE_KEY_ID).orEmpty()
-        braveKeyField.isEnabled = provider == "brave"
         webSearchFallbackCheckBox.isSelected = s.webSearchFallbackEnabled()
+        braveKeyField.text = ApiKeyStore.get(ApiKeyStore.BRAVE_KEY_ID).orEmpty()
+        // After both combo and checkbox hold their loaded values — the enabled
+        // state depends on both (primary = brave, or fallback enabled).
+        updateBraveKeyFieldState()
         aiPricingLookupCheckBox.isSelected = s.aiPricingLookupEnabled()
         pastedImageSizeCombo.selectedItem =
             s.pastedImageMaxSize().takeIf { it > 0 }?.toString() ?: "Original"

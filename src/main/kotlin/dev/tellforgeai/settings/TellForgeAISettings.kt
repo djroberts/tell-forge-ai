@@ -34,7 +34,9 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
          * Two-layer fallback: on a hard failure of the primary provider (error,
          * no key, empty results) the other provider is tried automatically, and
          * the model is allowed to re-call web_search with the other provider
-         * when it judges the results unsatisfactory.
+         * when it judges the results unsatisfactory. The Brave API key (stored
+         * in PasswordSafe) is used whenever Brave is attempted — as primary or
+         * as the fallback target.
          */
         var webSearchFallback: Boolean = true
         /** Explicit opt-in: use the selected LLM for a billable model-pricing lookup. */
