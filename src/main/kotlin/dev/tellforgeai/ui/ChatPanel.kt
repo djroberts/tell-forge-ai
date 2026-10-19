@@ -787,8 +787,14 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             add(stickyHeader, BorderLayout.SOUTH)
         }
         val chatCard = JPanel(BorderLayout()).apply {
-            add(chatHead, BorderLayout.NORTH)
-            add(findBar, BorderLayout.BEFORE_FIRST_LINE)
+            // findBar and chatHead must be NESTED: BorderLayout.BEFORE_FIRST_LINE
+            // is literally the same constraint as NORTH, so a sibling add() would
+            // silently evict the chat head (and with it the provider dropdown).
+            add(JPanel(BorderLayout()).apply {
+                isOpaque = false
+                add(findBar, BorderLayout.NORTH)
+                add(chatHead, BorderLayout.CENTER)
+            }, BorderLayout.NORTH)
             add(center, BorderLayout.CENTER)
             add(bottomWithImages, BorderLayout.SOUTH)
         }

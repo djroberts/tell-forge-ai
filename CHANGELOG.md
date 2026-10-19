@@ -4,6 +4,12 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.1] - 2026-10-31
+
+### Fixed
+- Chat find bar: the current search match is now marked with a solid bright-yellow fill and other matches with a soft yellow tint; the previous colors were nearly invisible, and the yellow on the current match was painted over by the text-selection band (ui)
+- Chat find bar no longer jumps around while the AI is streaming: streaming/tool-result repaints previously reset the match index, forcibly selected the first match and yanked the viewport on every refresh; they now silently re-anchor the highlight tags to the shifted offsets while keeping the current match and scroll position (ui)
+
 ## [0.15.0] - 2026-10-31
 
 ### Added

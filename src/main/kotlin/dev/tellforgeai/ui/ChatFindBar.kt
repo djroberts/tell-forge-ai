@@ -16,7 +16,9 @@ import javax.swing.Timer
 import javax.swing.JEditorPane
 import javax.swing.SwingConstants
 import javax.swing.event.DocumentListener
+import javax.swing.text.DefaultHighlighter
 import javax.swing.text.Element
+import javax.swing.text.Highlighter
 
 /**
  * Collapsible find bar for the chat transcript.
@@ -88,6 +90,19 @@ internal class ChatFindBar(
     /** Last query actually scanned; used by [invalidateMatches] to re-run. */
     private var lastQuery = ""
 
+    /**
+     * Tint painted over every match and a stronger fill over the current one,
+     * drawn via the pane's Highlighter so it renders even when the transcript
+     * has no keyboard focus (the native "selection" would be nearly invisible).
+     */
+    private val allMatchPainter = DefaultHighlighter.DefaultHighlightPainter(
+        com.intellij.ui.JBColor.namedColor("TellForgeAI.findMatch", Color(0x66FFEB80, true))
+    )
+    private val currentMatchPainter = DefaultHighlighter.DefaultHighlightPainter(
+        com.intellij.ui.JBColor.namedColor("TellForgeAI.findCurrentMatch", Color(0xFFFFD900.toInt(), true))
+    )
+    private val highlightTags = mutableListOf<Any>()
+
     init {
         border = JBUI.Borders.empty(4, 8, 4, 4)
         val buttons = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 2, 0)).apply {
@@ -104,12 +119,15 @@ internal class ChatFindBar(
         add(searchField, BorderLayout.CENTER)
         add(right, BorderLayout.EAST)
         isVisible = false
+        // Ensure the editor actually has a highlighter we can add tags to
+        // (JEditorPane installs a BasicHighlighter by default).
+        if (transcriptPane.highlighter == null) transcriptPane.highlighter = DefaultHighlighter()
 
         prevButton.addActionListener { previous() }
         nextButton.addActionListener { next() }
         closeButton.addActionListener { close() }
 
-        // Live search as the user types (debounced).
+        // Live search as the user types (debounced). Explicit navigation = true.
         searchField.document.addDocumentListener(object : DocumentListener {
             override fun insertUpdate(e: javax.swing.event.DocumentEvent) { scheduleRescan() }
             override fun removeUpdate(e: javax.swing.event.DocumentEvent) { scheduleRescan() }
@@ -149,7 +167,7 @@ internal class ChatFindBar(
         currentIndex = -1
         lastQuery = ""
         countLabel.text = ""
-        transcriptPane.select(0, 0)
+        clearHighlights()
         onClose()
     }
 
@@ -167,6 +185,7 @@ internal class ChatFindBar(
             (currentIndex + delta + matches.size) % matches.size
         }
         highlight(currentIndex)
+        matches.getOrNull(currentIndex)?.let { navigateToMatch(it) }
     }
 
     fun next() = move(+1)
@@ -176,26 +195,68 @@ internal class ChatFindBar(
     /**
      * Transient tail/finished-block updates shift document offsets. Rather than
      * tracking exactly which region was touched, re-run the scan (cheap for
-     * chat-sized documents).
+     * chat-sized documents). Navigation is suppressed: a streaming repaint must
+     * silently re-anchor the highlights, not jump the selection/viewport.
      */
     fun invalidateMatches() {
         if (!isVisible) return
-        matches = emptyList()
-        currentIndex = -1
-        if (lastQuery.isNotEmpty()) scheduleRescan()
+        if (lastQuery.isNotEmpty()) rescan(navigate = false) else {
+            matches = emptyList()
+            currentIndex = -1
+            clearHighlights()
+        }
     }
 
     private fun scheduleRescan() {
         searchTimer.restart()
     }
 
-    private fun rescan() {
+    /**
+     * [navigate] = user-triggered scan (typing a new query): jump to the first
+     * match. Streaming refreshes pass false so nothing moves/steals focus.
+     */
+    private fun rescan(navigate: Boolean = true) {
         val query = searchField.text
         lastQuery = query
+        // Keep the user's position: map the current index through the re-scan.
+        val prevIndex = currentIndex
+        val prevCount = matches.size
         matches = if (query.isEmpty()) emptyList() else computeMatches(query)
-        currentIndex = -1
-        updateCountLabel()
-        if (matches.isNotEmpty()) next()
+        clearHighlights()
+        for (range in matches) addHighlightTag(range, allMatchPainter)
+        if (navigate) {
+            currentIndex = -1
+            updateCountLabel()
+            if (matches.isNotEmpty()) next()
+        } else {
+            // Re-run the scan only re-hosts tags; keep the same ordinal position
+            // (clamped if the match count shrank) and re-paint the current fill.
+            currentIndex = if (prevCount > 0) prevIndex.coerceIn(0, matches.size - 1) else -1
+            updateCountLabel()
+            if (currentIndex >= 0) addHighlightTag(matches[currentIndex], currentMatchPainter)
+        }
+    }
+
+    /** Soft tints/fills painted on the transcript; they persist until cleared. */
+    private fun addHighlightTag(range: IntRange, painter: DefaultHighlighter.DefaultHighlightPainter) {
+        try {
+            transcriptPane.highlighter.addHighlight(range.first, range.last + 1, painter)?.let {
+                highlightTags.add(it)
+            }
+        } catch (e: Exception) {
+            // Document changed between scan and paint: skip this stale span.
+        }
+    }
+
+    private fun clearHighlights() {
+        for (tag in highlightTags) {
+            try {
+                transcriptPane.highlighter.removeHighlight(tag)
+            } catch (e: Exception) {
+                // Tag already gone (e.g. document rebuild) — nothing to do.
+            }
+        }
+        highlightTags.clear()
     }
 
     private fun updateCountLabel() {
@@ -206,11 +267,32 @@ internal class ChatFindBar(
         }
     }
 
-    /** Selects a match in the transcript pane and scrolls it into view. */
+    /**
+     * When a *new* match becomes current (user navigation or a fresh query),
+     * remove the old current-match fill so only one is filled.
+     */
     private fun highlight(index: Int) {
         updateCountLabel()
         val range = matches.getOrNull(index) ?: return
-        transcriptPane.select(range.first, range.last + 1)
+        while (highlightTags.size > matches.size) {
+            try {
+                transcriptPane.highlighter.removeHighlight(highlightTags.removeAt(highlightTags.size - 1))
+            } catch (e: Exception) {
+            }
+        }
+        addHighlightTag(range, currentMatchPainter)
+    }
+
+    /**
+     * Selects the match and scrolls it into view (explicit navigation only).
+     *
+     * The pane's selection is deliberately NOT used: DefaultHighlighter paints
+     * the selection band OVER highlight tags, which would cover our yellow
+     * current-match fill. Instead we scroll to the match and rely solely on
+     * the [currentMatchPainter] tag (opaque yellow) to mark it — the opaque
+     * yellow is visible over any content, with or without focus.
+     */
+    private fun navigateToMatch(range: IntRange) {
         try {
             val rect = transcriptPane.modelToView2D(range.first)?.bounds ?: return
             val viewport = scrollPane.viewport ?: return
@@ -224,10 +306,9 @@ internal class ChatFindBar(
                 )
             }
         } catch (e: Exception) {
-            // Layout may not have settled for a just-inserted block; selection is still applied.
+            // Layout may not have settled for a just-inserted block; ignore.
         }
     }
-
     /**
      * Case-insensitive scan over the document's leaf text (skips markup).
      * Returns document-relative ranges usable with [JEditorPane.select].
