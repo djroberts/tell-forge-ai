@@ -1191,7 +1191,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         val aiEnabled = settings.aiPricingLookupEnabled()
         // Bump the cache namespace when lookup validation changes, so old unverified prices aren't reused.
         // pricing-v3: context priorities reworked (provider /models first, Stale-safe callbacks).
-        val key = listOf("pricing-v3", profile.id, profile.trimmedBaseUrl(), model, settings.webSearchProvider().lowercase(), "ai=$aiEnabled").joinToString("|")
+        // pricing-v4: web-search provider moved to its own tab; key now reflects it.
+        val key = listOf("pricing-v4", profile.id, profile.trimmedBaseUrl(), model, settings.webSearchProvider().lowercase(), "ai=$aiEnabled").joinToString("|")
         modelInfoCacheKey = key
         val cached = settings.modelInfoCache(key)
         modelInfoLabel.text = cached?.let { formatModelInfo(profile, model, it.inputPricePerMillion, it.cachedInputPricePerMillion, it.outputPricePerMillion, it.status, it.checkedAt) }

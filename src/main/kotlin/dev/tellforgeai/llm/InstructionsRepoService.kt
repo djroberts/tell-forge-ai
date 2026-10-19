@@ -63,6 +63,18 @@ class InstructionsRepoService(private val project: Project) {
     /** True while a sync/clone is running — second Test clicks must not stack hung threads. */
     private val syncing = AtomicBoolean(false)
 
+    /**
+     * Per-clone-dir lock: prevents the write path (previewChange /
+     * commitAndPush / discardChange) from interleaving with a refresh's
+     * `reset --hard` + `clean -fd`, which would silently drop a staged,
+     * unpushed change. Keyed by clone dir so distinct repos/branches don't
+     * serialize unnecessarily. All acquisitions are short (one git op);
+     * never held while doing UI work.
+     */
+    private val dirLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    private fun lockFor(dir: File): Any = dirLocks.computeIfAbsent(dir.absolutePath) { Any() }
+
     /** True if a sync is currently running (for the dialog's Test button). */
     fun isSyncing(): Boolean = syncing.get()
 
@@ -115,13 +127,25 @@ class InstructionsRepoService(private val project: Project) {
         val spec = state().spec() ?: return
         val now = System.currentTimeMillis()
         if (now - lastRefreshAttemptAt < 60_000) return
+        // Serialize behind the same mutex syncNowFor uses: a background
+        // refresh here races the dialog's Test sync (clone deletes the dir
+        // another thread is fetching in → "not a git repository"). When
+        // another sync is in flight, just skip — the throttle retries later.
+        if (!syncing.compareAndSet(false, true)) return
         lastRefreshAttemptAt = now
         try {
-            val dir = ensureClone(spec, branch())
-            if (dir != null) reloadSnapshot(dir, spec)
+            val dir = synchronized(lockFor(cloneDir(spec, branch()))) {
+                ensureClone(spec, branch()).also {
+                    // Seeding inside reload can add/commit/push — keep it
+                    // inside the same lock as any concurrent write path.
+                    if (it != null) reloadSnapshot(it, spec)
+                }
+            }
         } catch (e: Exception) {
             LOG.warn("instructions repo refresh failed", e)
             markError(friendly(e))
+        } finally {
+            syncing.set(false)
         }
     }
 
@@ -158,13 +182,20 @@ class InstructionsRepoService(private val project: Project) {
         InstructionsSyncLog.mark("sync started (url=${spec.cloneUrl}, branch=$branchName)")
         onStage("resolving repo URL")
         val dir = try {
-            ensureClone(spec, branchName, onStage) ?: return snapshot.get()
+            // Hold the per-clone-dir lock for the whole clone/fetch: the
+            // write path must not stage or diff while fetch/reset touches
+            // the same dir.
+            synchronized(lockFor(cloneDir(spec, branchName))) {
+                ensureClone(spec, branchName, onStage) ?: return snapshot.get()
+            }
         } catch (e: MissingBranchException) {
             // Branch didn't exist on the remote: ensureClone already cloned
             // the remote default branch and created the branch locally on top
             // of it (unpushed). Load from that clone and report what happened.
             onStage("reading markdown files")
-            val snap = reloadSnapshot(cloneDir(spec, branchName), spec)
+            val snap = synchronized(lockFor(cloneDir(spec, branchName))) {
+                reloadSnapshot(cloneDir(spec, branchName), spec)
+            }
             val note = if (snap.error.isEmpty()) {
                 "branch '$branchName' did not exist — created locally from remote default " +
                     "'${e.defaultBranch}' (it will be pushed on first instructions_write)"
@@ -178,7 +209,7 @@ class InstructionsRepoService(private val project: Project) {
             return snapshot.get().copy(error = friendly(e))
         }
         onStage("reading markdown files")
-        val snap = reloadSnapshot(dir, spec)
+        val snap = synchronized(lockFor(dir)) { reloadSnapshot(dir, spec) }
         if (snap.error.isNotEmpty()) throw IllegalStateException(snap.error)
         onStage(if (lastSeedNote != null) "seeded default INSTRUCTIONS.md" else "done")
         val note = lastSeedNote
@@ -195,7 +226,9 @@ class InstructionsRepoService(private val project: Project) {
      */
     private fun ensureClone(spec: RepoSpec, branchName: String, onStage: (String) -> Unit = {}): File? {
         val dir = cloneDir(spec, branchName)
-        if (!File(dir, ".git").isDirectory) {
+        // A dir that no longer carries a real repo (tmp-cleaner removed .git,
+        // partial delete, etc.) is treated as "no clone" so we re-clone.
+        if (!isRealClone(dir)) {
             LOG.info("instructions repo: cloning ${spec.cloneUrl} (branch $branchName) into $dir")
             FileUtil.delete(dir)
             dir.parentFile.mkdirs()
@@ -239,6 +272,16 @@ class InstructionsRepoService(private val project: Project) {
                 InstructionsSyncLog.warn("branch '$branchName' missing on remote during fetch — deleting stale clone and retrying")
                 FileUtil.delete(dir)
                 return ensureClone(spec, branchName, onStage)
+            } catch (e: Exception) {
+                // The clone rotted underneath us (tmp cleaner removed .git,
+                // partial delete, corrupt metadata) — the error surfaces as
+                // "not a git repository". Drop it and re-clone once; if that
+                // also fails the real error propagates as before.
+                if (!isRepoError(e)) throw e
+                LOG.warn("instructions repo: fetch hit a broken clone — deleting and re-cloning", e)
+                InstructionsSyncLog.warn("fetch failed on a broken clone — deleting ${dir.name} and re-cloning")
+                FileUtil.delete(dir)
+                retryReclone(spec, branchName, onStage)
             }
         } else {
             LOG.info("instructions repo: using fresh local clone at $dir")
@@ -464,6 +507,9 @@ class InstructionsRepoService(private val project: Project) {
                 msg.contains("Connection timed out", true) ||
                 msg.contains("Network is unreachable", true) ->
                 "git could not reach the remote (network): $msg"
+            msg.contains("not a git repository", true) ->
+                "the local instructions clone was invalid or removed mid-run (tmp cleaner?) — " +
+                    "a fresh clone has been attempted automatically: $msg"
             else -> msg
         }
     }
@@ -484,7 +530,7 @@ class InstructionsRepoService(private val project: Project) {
         val spec = state().spec() ?: return null
         val dir = cloneDir(spec, branch())
         try {
-            if (!File(dir, ".git").isDirectory) ensureClone(spec, branch())
+            if (!isRealClone(dir)) ensureClone(spec, branch())
         } catch (_: Exception) {
             return null
         }
@@ -492,15 +538,19 @@ class InstructionsRepoService(private val project: Project) {
         val file = resolve(root, relPath) ?: return null
         val repoRel = if (spec.subpath.isBlank() || root == dir) relPath.trimStart('/', '\\')
         else "${spec.subpath}/${relPath.trimStart('/', '\\')}"
+        // Serialized with the sync side so a concurrent fetch/reset can't
+        // wipe the staged change out from under the diff.
         return try {
-            file.parentFile?.mkdirs()
-            val existed = file.isFile
-            if (existed && file.readText(StandardCharsets.UTF_8) == content) {
-                "(no changes)"
-            } else {
-                file.writeText(content, StandardCharsets.UTF_8)
-                git(dir, "add", "--", repoRel)
-                if (existed) diff(dir) else "(new file)"
+            synchronized(lockFor(dir)) {
+                file.parentFile?.mkdirs()
+                val existed = file.isFile
+                if (existed && file.readText(StandardCharsets.UTF_8) == content) {
+                    "(no changes)"
+                } else {
+                    file.writeText(content, StandardCharsets.UTF_8)
+                    git(dir, "add", "--", repoRel)
+                    if (existed) diff(dir) else "(new file)"
+                }
             }
         } catch (e: Exception) {
             throw IllegalStateException("failed to write '$relPath': ${e.message}", e)
@@ -519,9 +569,11 @@ class InstructionsRepoService(private val project: Project) {
         val repoRel = if (spec.subpath.isBlank() || root == dir) relPath.trimStart('/', '\\')
         else "${spec.subpath}/${relPath.trimStart('/', '\\')}"
         try {
-            git(dir, "checkout", "--", repoRel)
-            git(dir, "reset", "--", repoRel)
-            File(root, relPath.trimStart('/', '\\')).delete()
+            synchronized(lockFor(dir)) {
+                git(dir, "checkout", "--", repoRel)
+                git(dir, "reset", "--", repoRel)
+                File(root, relPath.trimStart('/', '\\')).delete()
+            }
         } catch (e: Exception) {
             LOG.warn("instructions discard failed", e)
         }
@@ -540,18 +592,22 @@ class InstructionsRepoService(private val project: Project) {
         val dir = cloneDir(spec, branch())
         val repoRel = if (spec.subpath.isBlank()) relPath.trimStart('/', '\\')
         else "${spec.subpath}/${relPath.trimStart('/', '\\')}"
-        git(dir, "add", "--", repoRel)
-        git(dir, "-c", "user.name=TellForgeAI", "-c", "user.email=tellforgeai@localhost",
-            "commit", "-m", message.ifBlank { "update instructions" })
-        try {
-            git(dir, "push", "origin", "HEAD:${branch()}")
-        } catch (e: Exception) {
-            git(dir, "pull", "--rebase", "origin", branch())
-            git(dir, "push", "origin", "HEAD:${branch()}")
+        // Committed atomically against the sync side: no fetch/reset may
+        // run between staging and the (possibly retried) push.
+        synchronized(lockFor(dir)) {
+            git(dir, "add", "--", repoRel)
+            git(dir, "-c", "user.name=TellForgeAI", "-c", "user.email=tellforgeai@localhost",
+                "commit", "-m", message.ifBlank { "update instructions" })
+            try {
+                git(dir, "push", "origin", "HEAD:${branch()}")
+            } catch (e: Exception) {
+                git(dir, "pull", "--rebase", "origin", branch())
+                git(dir, "push", "origin", "HEAD:${branch()}")
+            }
+            val hash = git(dir, "rev-parse", "--short", "HEAD").trim()
+            reloadSnapshot(dir, spec)
+            return "Committed and pushed $hash to ${branch()}."
         }
-        val hash = git(dir, "rev-parse", "--short", "HEAD").trim()
-        reloadSnapshot(dir, spec)
-        return "Committed and pushed $hash to ${branch()}."
     }
 
     // ------------------------------------------------------------------
@@ -602,7 +658,7 @@ class InstructionsRepoService(private val project: Project) {
         try {
             val dir = currentCloneDir() ?: return null
             val spec = state().spec() ?: return null
-            if (!File(dir, ".git").isDirectory) return null
+            if (!isRealClone(dir)) return null
             val root = contentRoot(dir) ?: dir
             val f = resolve(root, CANONICAL_FILE) ?: return null
             if (f.isFile) return f.readText(StandardCharsets.UTF_8)
@@ -612,14 +668,52 @@ class InstructionsRepoService(private val project: Project) {
         }
     }
 
-    /** Deterministic per (url, branch) clone location under the plugin temp dir. */
+    /**
+     * Deterministic per (url, branch) clone location under the IDE system
+     * directory (NOT the OS temp dir — tmp cleaners would delete `.git` from
+     * under us and later fetches would die with "not a git repository").
+     */
     private fun cloneDir(spec: RepoSpec, branchName: String): File {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest("${spec.cloneUrl}|${branchName}".toByteArray())
             .joinToString("") { "%02x".format(it) }
             .take(16)
-        val base = File(FileUtil.getTempDirectory(), "tellforgeai-instructions")
+        val base = File(File(System.getProperty("idea.system.path", "build/idea-system")), "tellforgeai-instructions")
         return File(base, digest)
+    }
+
+    /** Detects "not a git repository" and similar clone-rot errors from git output. */
+    private fun isRepoError(e: Exception): Boolean {
+        val msg = (e.message ?: "").lowercase()
+        return msg.contains("not a git repository") || msg.contains("not a valid git")
+    }
+
+    /**
+     * One-shot fallback used when a fetch hits a broken clone: force the
+     * fresh-clone path by wiping the dir, then re-run [ensureClone]. A
+     * failure here propagates to the caller as before.
+     */
+    private fun retryReclone(spec: RepoSpec, branchName: String, onStage: (String) -> Unit) {
+        val dir = cloneDir(spec, branchName)
+        FileUtil.delete(dir)
+        val re = ensureClone(spec, branchName, onStage)
+        if (re != null) reloadSnapshot(re, spec)
+    }
+
+    /**
+     * True when [dir] looks like a healthy instructions clone (`.git`
+     * present and `git status` works). Cheap directory check plus a fast
+     * status probe — survives tmp-cleaners that delete `.git` but leave
+     * the working tree, which previously made later fetches fail forever
+     * with "not a git repository (exit 128)".
+     */
+    private fun isRealClone(dir: File): Boolean {
+        if (!File(dir, ".git").isDirectory) return false
+        return try {
+            git(dir, "--no-pager", "status", "--porcelain") != null
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** Resolves [relPath] against [root] (already incl. subpath), rejecting traversal outside it. */

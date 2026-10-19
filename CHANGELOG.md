@@ -4,6 +4,22 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.0] - 2026-10-19
+
+### Added
+- SearXNG search provider: searches any SearXNG instance (self-hosted or public) via its JSON API — no API key needed, only an instance base URL from the new settings tab; the instance must have `format=json` enabled in its `search.formats`; `localhost` instance URLs are normalized to `127.0.0.1` so IPv4-only instances connect (tools)
+- Explicit fallback selection replaces the web-search fallback checkbox: a second dropdown lets you pick None (no automatic fallback), Auto (first other available provider, previous behavior) or a specific provider as the fallback target used when the primary hard-fails; previous boolean preferences migrate automatically (tools/settings)
+- Dedicated "TellForgeAI Web Search" settings tab (Tools → TellForgeAI): provider choice, fallback selection, per-provider API-key fields and a "Test search" button that fires a canned query against the selected provider using the unsaved key, so a wrong key can be verified without applying; the TellForgeAI Providers page is now profile-only (settings)
+- Any registered provider can still be deliberately targeted by the model via web_search's `provider` argument regardless of the fallback setting; unknown provider ids are denied with a note listing the known ones (tools)
+
+### Changed
+- Web-search backends are now a provider registry (`SearchProvider` implementations): DuckDuckGo, Brave and SearXNG are interchangeable; adding a provider means implementing the interface and registering it, with its settings UI, availability check and routing following automatically (tools)
+- The model-pricing lookup path (ModelInfoLookup) now uses the same registry and configured fallback instead of a hardcoded DuckDuckGo/Brave pair, including SearXNG support (llm)
+
+### Fixed
+- Instructions repo sync no longer fails forever with "not a git repository" when OS tmp-cleaners delete the clone's `.git` directory: a broken clone is detected (`.git` present but `git status` fails) and automatically re-cloned, and a clone missing `.git` is treated as absent rather than reused (llm)
+- Staged, unpushed instructions edits are no longer silently wiped by a concurrent background sync: clone/refresh (`reset --hard` + `clean -fd`) and the write path (preview/commit/discard) are now serialized behind a per-clone-dir lock, and overlapping syncs skip instead of racing each other's clone (llm)
+
 ## [0.15.1] - 2026-10-31
 
 ### Fixed

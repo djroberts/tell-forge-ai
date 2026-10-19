@@ -31,13 +31,8 @@ class TellForgeAIConfigurable : Configurable {
     private val reasoningEffortField = JBTextField()
     private val contextWindowField = JBTextField()
     private val timeoutField = JBTextField()
-    private val webSearchProviderCombo = JComboBox(arrayOf("brave", "duckduckgo"))
     /** Longest-side cap for pasted images: 256/512/1024/2048/Original. */
     private val pastedImageSizeCombo = JComboBox(arrayOf("256", "512", "1024", "2048", "Original"))
-    /** Allow the other provider on hard failure (code) or on LLM retry. */
-    private val webSearchFallbackCheckBox =
-        JCheckBox("Fallback to the other provider when the primary fails (code) or the model finds results unsatisfactory (LLM may re-call web_search with the other provider)")
-    private val braveKeyField = JPasswordField()
     private val aiPricingLookupCheckBox = JCheckBox("Use the selected LLM for a billable pricing lookup (cached for 24 hours)")
     /** API protocol selector (OpenAI-compatible / OpenAI Responses / Gemini preset). */
     private val protocolCombo = JComboBox(ApiProtocol.entries.map { it.displayName }.toTypedArray())
@@ -113,19 +108,6 @@ class TellForgeAIConfigurable : Configurable {
                 }
             }
         )
-        braveKeyField.document.addDocumentListener(SimpleDocListener { if (!suppressFieldListeners) modified = true })
-        // The Brave key is usable whenever Brave can actually be attempted:
-        // as the primary, or as the fallback target when fallback is on.
-        webSearchProviderCombo.addActionListener {
-            if (suppressFieldListeners) return@addActionListener
-            modified = true
-            updateBraveKeyFieldState()
-        }
-        webSearchFallbackCheckBox.addActionListener {
-            if (suppressFieldListeners) return@addActionListener
-            modified = true
-            updateBraveKeyFieldState()
-        }
         pastedImageSizeCombo.addActionListener { if (!suppressFieldListeners) modified = true }
         aiPricingLookupCheckBox.addActionListener { if (!suppressFieldListeners) modified = true }
         // API protocol: switching swaps the base-url default and toggles the
@@ -236,26 +218,6 @@ class TellForgeAIConfigurable : Configurable {
         override fun changedUpdate(e: javax.swing.event.DocumentEvent?) = onChange()
     }
 
-    /**
-     * Single source of truth for the Brave-key field's enabled state: usable
-     * whenever Brave can actually be attempted — as the primary provider, or
-     * as the fallback target when "Fallback to the other provider" is on
-     * (previously the field was gated on the primary alone, so with duckduckgo
-     * as primary the fallback-to-Brave path had no way to receive a key).
-     * Call after any change to the provider combo or the fallback checkbox,
-     * and after programmatic state loads.
-     */
-    private fun updateBraveKeyFieldState() {
-        val primary = webSearchProviderCombo.selectedItem == "brave"
-        val fallback = webSearchFallbackCheckBox.isSelected
-        braveKeyField.isEnabled = primary || fallback
-        braveKeyField.toolTipText = when {
-            primary -> "Used for every Brave search (primary provider)"
-            fallback -> "Used when the search falls back to Brave (primary is duckduckgo)"
-            else -> "Enable fallback, or select brave as the primary provider, to use a Brave API key"
-        }
-    }
-
     override fun getDisplayName(): String = "TellForgeAI Providers"
 
     override fun createComponent(): JComponent {
@@ -301,9 +263,6 @@ class TellForgeAIConfigurable : Configurable {
         center.add(JSeparator())
         center.add(JLabel(" "))
         center.add(labeled("Command timeout in seconds (5–600, applies to terminal tool; global)", timeoutField))
-        center.add(labeled("Web search provider (duckduckgo = keyless; brave = requires API key; global)", webSearchProviderCombo))
-        center.add(webSearchFallbackCheckBox)
-        center.add(labeled("Brave Search API key (used when provider is brave, including as fallback; stored in PasswordSafe; global)", braveKeyField))
         center.add(aiPricingLookupCheckBox)
         center.add(labeled("Max pasted image size in px (longest side; Original = no resize; global)", pastedImageSizeCombo))
         aiPricingLookupCheckBox.addActionListener { modified = true }
@@ -325,13 +284,6 @@ class TellForgeAIConfigurable : Configurable {
     private fun loadGlobalFields() {
         val s = TellForgeAISettings.getInstance()
         timeoutField.text = s.commandTimeoutSeconds().toString()
-        val provider = s.webSearchProvider().lowercase()
-        webSearchProviderCombo.selectedItem = if (provider == "brave") "brave" else "duckduckgo"
-        webSearchFallbackCheckBox.isSelected = s.webSearchFallbackEnabled()
-        braveKeyField.text = ApiKeyStore.get(ApiKeyStore.BRAVE_KEY_ID).orEmpty()
-        // After both combo and checkbox hold their loaded values — the enabled
-        // state depends on both (primary = brave, or fallback enabled).
-        updateBraveKeyFieldState()
         aiPricingLookupCheckBox.isSelected = s.aiPricingLookupEnabled()
         pastedImageSizeCombo.selectedItem =
             s.pastedImageMaxSize().takeIf { it > 0 }?.toString() ?: "Original"
@@ -665,10 +617,6 @@ class TellForgeAIConfigurable : Configurable {
             settings.commandTimeoutSeconds()
         }
         settings.setCommandTimeoutSeconds(timeout)
-        settings.setWebSearchProvider(
-            (webSearchProviderCombo.selectedItem as? String) ?: "duckduckgo"
-        )
-        settings.setWebSearchFallback(webSearchFallbackCheckBox.isSelected)
         settings.setAiPricingLookupEnabled(aiPricingLookupCheckBox.isSelected)
         settings.setPastedImageMaxSize(
             when (val sel = pastedImageSizeCombo.selectedItem as? String) {
@@ -676,7 +624,6 @@ class TellForgeAIConfigurable : Configurable {
                 else -> sel?.toIntOrNull() ?: 1024
             },
         )
-        ApiKeyStore.set(ApiKeyStore.BRAVE_KEY_ID, String(braveKeyField.password).trim())
         val ids = listModel.elements().toList().map { it.id }.toSet()
         // Remove PasswordSafe entries for profiles deleted through this settings
         // UI *this session* — not merely absent from the list. If the profile

@@ -7,6 +7,7 @@ import dev.tellforgeai.settings.ApiKeyStore
 import dev.tellforgeai.settings.TellForgeAISettings
 import kotlinx.serialization.json.*
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -129,20 +130,80 @@ object ModelInfoLookup {
 
     /**
      * Primary provider per settings; on hard failure (error / empty / missing
-     * key) the other provider is retried when fallback is enabled — same
-     * two-layer policy as WebSearchTool minus the LLM layer (this path is
-     * not agent-driven).
+     * key) the configured fallback provider is retried — same policy as
+     * WebSearchTool minus the LLM layer (this path is not agent-driven).
      */
     private fun search(query: String, step: (String) -> Unit): Pair<List<Result>, String?> {
         val settings = TellForgeAISettings.getInstance()
-        val preferBrave = settings.webSearchProvider().lowercase() == "brave"
-        val primary = if (preferBrave) searchBrave(query, step) else searchDdg(query, step)
-        val secondary = if (preferBrave) searchDdg(query, step) else searchBrave(query, step)
+        val primaryId = dev.tellforgeai.tools.SearchProviders.normalize(settings.webSearchProvider())
+            ?: dev.tellforgeai.tools.SearchProviders.all.first().id
+        val fallbackId = when (val sel = settings.fallbackProvider()) {
+            TellForgeAISettings.FALLBACK_NONE -> null
+            TellForgeAISettings.FALLBACK_AUTO ->
+                dev.tellforgeai.tools.SearchProviders.all
+                    .firstOrNull { it.id != primaryId && it.available() }?.id
+            else -> sel.takeIf { it != primaryId }
+        }
+        val primary = runProviderSearch(primaryId, query, step)
         val (resA, errA) = primary ?: (null to null)
-        val fallbackEnabled = settings.webSearchFallbackEnabled()
-        val useFallback = fallbackEnabled && (resA.isNullOrEmpty() || errA != null)
-        val (resB, errB) = if (useFallback) (secondary ?: (null to null)) else (emptyList<Result>() to null)
+        val useFallback = fallbackId != null && (resA.isNullOrEmpty() || errA != null)
+        val (resB, errB) = if (useFallback) runProviderSearch(fallbackId!!, query, step) ?: (null to null)
+        else (emptyList<Result>() to null)
         return ((resA.orEmpty() + resB) as List<Result>) to (errA ?: errB)
+    }
+
+    /** Runs one engine by registry id via [WebSearchTool]-style shared providers. */
+    private fun runProviderSearch(
+        providerId: String,
+        query: String,
+        step: (String) -> Unit,
+    ): Pair<List<Result>?, String?>? = when (providerId) {
+        "brave" -> searchBrave(query, step)
+        "searxng" -> searchSearxng(query, step)
+        else -> searchDdg(query, step)
+    }
+
+    private fun searchSearxng(query: String, step: (String) -> Unit): Pair<List<Result>?, String?>? {
+        val endpoint = dev.tellforgeai.tools.SearchProviders.SearxngProvider.url()
+        if (endpoint.isEmpty()) {
+            step("SearXNG skipped: no instance URL configured")
+            return null
+        }
+        return try {
+            val httpUrl = endpoint.toHttpUrlOrNull()
+                ?.newBuilder()
+                ?.addQueryParameter("q", query)
+                ?.addQueryParameter("format", "json")
+                ?.build()
+                ?: run {
+                    step("SearXNG invalid URL: $endpoint")
+                    return null to "SearXNG search failed (invalid URL)"
+                }
+            val request = Request.Builder().url(httpUrl).header("Accept", "application/json").get().build()
+            http.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    step("SearXNG HTTP ${response.code} for query \"$query\"")
+                    return@use null to "SearXNG search failed (HTTP ${response.code})"
+                }
+                val body = response.body?.string().orEmpty()
+                val array = Json.parseToJsonElement(body).jsonObject["results"]?.jsonArray
+                if (array == null) {
+                    step("SearXNG returned no results in body (${body.length} chars) for query \"$query\"")
+                    return@use null to "SearXNG returned no results"
+                }
+                val parsed = array.mapNotNull { element ->
+                    val obj = element.jsonObject
+                    val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val urlValue = obj["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    Result(title, urlValue, obj["content"]?.jsonPrimitive?.contentOrNull.orEmpty())
+                }
+                step("SearXNG parsed ${parsed.size} results (${parsed.joinToString { it.url }})")
+                parsed to parsed.takeIf(List<Result>::isEmpty)?.let { "SearXNG returned no results" }
+            }
+        } catch (e: Exception) {
+            step("SearXNG exception: ${e.message ?: e.javaClass.simpleName}")
+            null to "SearXNG search failed (${e.message ?: e.javaClass.simpleName})"
+        }
     }
 
     /** Extracts the bare host for site-scoped queries: "https://hostyourai.com/api/v1" → "hostyourai.com". */

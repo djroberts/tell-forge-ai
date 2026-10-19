@@ -31,6 +31,16 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
         /** Web-search backend: "duckduckgo" (keyless) or "brave" (needs API key). */
         var webSearchProvider: String = "duckduckgo"
         /**
+         * Fallback target used when the primary hard-fails (error, missing key,
+         * empty results). "none" disables the code fallback (previously the
+         * `webSearchFallback` boolean did this), "auto" retries the first
+         * registered-and-available other provider, otherwise a provider id.
+         * Unset/legacy values default to "auto".
+         */
+        var webSearchFallbackProvider: String = ""
+        /** SearXNG instance base URL (JSON API must be enabled there); blank = unavailable. */
+        var searxngBaseUrl: String = ""
+        /**
          * Two-layer fallback: on a hard failure of the primary provider (error,
          * no key, empty results) the other provider is tried automatically, and
          * the model is allowed to re-call web_search with the other provider
@@ -114,10 +124,25 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
         state.webSearchProvider = value
     }
 
-    fun webSearchFallbackEnabled(): Boolean = state.webSearchFallback
+    fun webSearchFallbackEnabled(): Boolean = fallbackProvider() != FALLBACK_NONE
 
-    fun setWebSearchFallback(value: Boolean) {
-        state.webSearchFallback = value
+    /**
+     * Resolved fallback target: null = disabled, "auto" = first registered
+     * other available provider, otherwise a concrete provider id.
+     */
+    fun fallbackProvider(): String = when (val v = state.webSearchFallbackProvider.trim().lowercase()) {
+        "" -> if (state.webSearchFallback) "auto" else FALLBACK_NONE // legacy boolean migration
+        else -> v
+    }
+
+    fun setFallbackProvider(value: String) {
+        state.webSearchFallbackProvider = value.trim().lowercase()
+    }
+
+    fun searxngBaseUrl(): String = state.searxngBaseUrl.trim()
+
+    fun setSearxngBaseUrl(value: String) {
+        state.searxngBaseUrl = value.trim()
     }
 
     fun aiPricingLookupEnabled(): Boolean = state.aiPricingLookupEnabled
@@ -159,5 +184,9 @@ class TellForgeAISettings : PersistentStateComponent<TellForgeAISettings.State> 
         fun getInstance(): TellForgeAISettings =
             ApplicationManager.getApplication()
                 .getService(TellForgeAISettings::class.java)
+
+        /** Fallback-selection sentinel values (persisted in webSearchFallbackProvider). */
+        const val FALLBACK_NONE = "none"
+        const val FALLBACK_AUTO = "auto"
     }
 }

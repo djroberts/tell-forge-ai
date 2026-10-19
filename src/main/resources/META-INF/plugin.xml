@@ -45,5 +45,10 @@
                 id="dev.tellforgeai.settings.TellForgeAIConfigurable"
                 displayName="TellForgeAI Providers"
                 instance="dev.tellforgeai.settings.TellForgeAIConfigurable"/>
+        <applicationConfigurable
+                parentId="tools"
+                id="dev.tellforgeai.settings.TellForgeAIWebSearchConfigurable"
+                displayName="TellForgeAI Web Search"
+                instance="dev.tellforgeai.settings.TellForgeAIWebSearchConfigurable"/>
     </extensions>
 </idea-plugin>
