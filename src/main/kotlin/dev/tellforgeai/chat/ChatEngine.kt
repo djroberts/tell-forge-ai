@@ -132,6 +132,7 @@ class ChatEngine(
         compactionFailedForCurrentTurn = false
         streamingText.setLength(0)
         reasoningText.setLength(0)
+        pendingReasoning = ""
         startTurn()
     }
 
@@ -232,6 +233,16 @@ class ChatEngine(
                     is LlmClient.Event.Error -> {
                         lastTurnFailed = true
                         finalizeAssistantBlock()
+                        // finalizeAssistantBlock keeps reasoning in pendingReasoning
+                        // when its answer text was blank; a failed round's thinking
+                        // must still reach persistence (nothing lost).
+                        if (pendingReasoning.isNotBlank()) {
+                            addToMessages {
+                                it += ChatMessage.assistant("").copy(reasoning = pendingReasoning)
+                            }
+                            pendingReasoning = ""
+                            persistChat()
+                        }
                         listener.onSystem("Error: ${event.message}")
                         endTurn()
                     }
@@ -297,7 +308,10 @@ class ChatEngine(
             val streamedSomething = streamingText.isNotEmpty()
             finalizeAssistantBlock()
             if (event.fullText.isNotBlank() && !streamedSomething) {
-                addToMessages { it += ChatMessage.assistant(event.fullText) }
+                addToMessages {
+                    it += ChatMessage.assistant(event.fullText).copy(reasoning = pendingReasoning)
+                }
+                pendingReasoning = ""
             }
             persistChat()
             endTurn()
@@ -311,7 +325,10 @@ class ChatEngine(
             listener.onSystem("Stopped after $MAX_TOOL_ROUNDS tool rounds to avoid an endless loop. " +
                 "Press Send to let it continue.")
             if (event.fullText.isNotBlank() && !streamedSomething) {
-                addToMessages { it += ChatMessage.assistant(event.fullText) }
+                addToMessages {
+                    it += ChatMessage.assistant(event.fullText).copy(reasoning = pendingReasoning)
+                }
+                pendingReasoning = ""
             }
             addToMessages {
                 it += ChatMessage.user(
@@ -347,7 +364,17 @@ class ChatEngine(
         // streamed no preamble text, otherwise the next round sends a
         // function_call_output with no matching function_call (HTTP 400,
         // "No tool call found for function call output", on /v1/responses).
-        addToMessages { it += ChatMessage.assistantWithToolCalls(event.fullText, event.toolCalls) }
+        // The round's reasoning travels with it: captured here when the
+        // preamble finalize didn't run for this path.
+        if (reasoningText.isNotEmpty() && pendingReasoning.isBlank()) {
+            pendingReasoning = reasoningText.toString()
+            reasoningText.setLength(0)
+        }
+        addToMessages {
+            it += ChatMessage.assistantWithToolCalls(event.fullText, event.toolCalls)
+                .copy(reasoning = pendingReasoning)
+        }
+        pendingReasoning = ""
         persistChat()
         val calls = event.toolCalls
         calls.forEach { listener.onToolPending(it) }
@@ -429,21 +456,34 @@ class ChatEngine(
         }
         streamingText.setLength(0)
         reasoningText.setLength(0)
+        pendingReasoning = ""
         listener.onTurnEnded(wasStopped)
     }
 
     /**
      * Persists the in-flight assistant message: the accumulated streaming text
-     * becomes a history entry if it has content.
+     * becomes a history entry if it has content. The accumulated reasoning
+     * travels with it (kept even when the answer text is blank — an assistant
+     * block that requested tool calls may still have streamed thinking first,
+     * and dropping it there lost the KB counter for that round).
      */
     private fun finalizeAssistantBlock() {
         val md = streamingText.toString()
         streamingText.setLength(0)
+        val reasoning = reasoningText.toString()
         reasoningText.setLength(0)
+        // Blank answer text: nothing to persist here — the reasoning stays in
+        // [reasoning] and is re-exposed to onTurnDone via [pendingReasoning]
+        // so the tool-call message can still carry it.
+        pendingReasoning = reasoning
         if (md.isBlank()) return
-        addToMessages { it += ChatMessage.assistant(md) }
+        pendingReasoning = ""
+        addToMessages { it += ChatMessage.assistant(md).copy(reasoning = reasoning) }
         persistChat()
     }
+
+    /** Reasoning captured by [finalizeAssistantBlock] that has not yet been persisted. */
+    private var pendingReasoning = ""
 
     private fun addToMessages(block: (MutableList<ChatMessage>) -> Unit) {
         val chat = chat() ?: return
@@ -466,6 +506,9 @@ class ChatEngine(
 
     /** Text streamed so far in the in-flight assistant message ("" when idle). */
     fun streamingTextSnapshot(): String = streamingText.toString()
+
+    /** Reasoning text streamed so far in the in-flight assistant message. */
+    fun reasoningTextSnapshot(): String = reasoningText.toString()
 
     companion object {
         /** Max tool request/execute/feedback rounds per user turn. */

@@ -4,6 +4,11 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.1] - 2026-11-02
+
+### Fixed
+- Model thinking ("N KB reasoned") is no longer discarded at the end of a turn: reasoning text is persisted per assistant message, so reopening a chat (or restarting the IDE) shows the correct KB figure instead of resetting it to 0 KB, and no reasoning text is lost — including stopped, errored and tool-loop rounds (chat/ui)
+
 ## [0.16.0] - 2026-10-19
 
 ### Added
