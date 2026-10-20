@@ -31,6 +31,16 @@ data class ChatMessage(
      *  @path tokens. The full-resolution payloads live in [images]; this list
      *  only records *which files* were referenced, for display and history. */
     var referencedPaths: List<String> = emptyList(),
+    /** Accumulated model "thinking"/reasoning for this assistant turn.
+     *  Storage/display only — it is NOT sent back to the provider on later
+     *  turns (behavior identical to before persistence). Empty for ordinary
+     *  answers; never truncated: losing reasoning text was a correctness bug. */
+    var reasoning: String = "",
+    /** True for engine-injected notices (e.g. the tool-loop stop prompt). Such
+     *  messages must NOT extend "current turn" protection during trimming —
+     *  the last real user message is what anchors the turn. Persisted with a
+     *  default so older tellforgeai.chats.xml files still deserialize. */
+    var synthetic: Boolean = false,
 ) {
     companion object {
         fun system(content: String) = ChatMessage("system", content)
@@ -38,8 +48,8 @@ data class ChatMessage(
         fun assistant(content: String) = ChatMessage("assistant", content)
 
         /** Assistant message that requested one or more tool calls. */
-        fun assistantWithToolCalls(content: String, calls: List<ToolCall>) =
-            ChatMessage("assistant", content, toolCalls = calls)
+        fun assistantWithToolCalls(content: String, calls: List<ToolCall>, reasoning: String = "") =
+            ChatMessage("assistant", content, toolCalls = calls, reasoning = reasoning)
 
         /** Tool result message fed back to the model. */
         fun toolResult(callId: String, content: String) =

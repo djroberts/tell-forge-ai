@@ -30,11 +30,37 @@ object ConversationCompactor {
     fun shouldCompact(promptTokens: Int, contextWindow: Int): Boolean =
         contextWindow > 0 && promptTokens >= (contextWindow * TRIGGER_FRACTION).toInt()
 
-    /** Builds a compact, text-only input; image payloads are never duplicated into the summary request. */
+    /** Builds a compact, text-only input; image payloads are never duplicated into the summary request.
+     *
+     *  Bounded by design — this input becomes a real LLM request, so it must
+     *  never exceed the window itself:
+     *   - per message, content is head-truncated (tool results hardest);
+     *   - tool-call ARGUMENTS are truncated too (an unbounded big file list
+     *     previously slipped through into the transcript);
+     *   - a global [MAX_TRANSCRIPT_CHARS] cap drops the OLDEST messages of
+     *     the region with an explicit "[N older messages omitted]" note, the
+     *     newest old turns being the most valuable for the summary.
+     */
     fun summarizationMessages(
         oldMessages: List<ChatMessage>,
         priorSummary: String,
     ): List<ChatMessage> {
+        // Region-wide cap, applied before per-message truncation.
+        val capped = run {
+            var kept = oldMessages.size
+            var total = oldMessages.sumOf { m -> m.content.length + m.toolCalls.sumOf { c -> c.arguments.length } }
+            while (kept > 1 && total > MAX_TRANSCRIPT_CHARS) {
+                val m = oldMessages[oldMessages.size - kept]
+                total -= m.content.length + m.toolCalls.sumOf { c -> c.arguments.length }
+                kept--
+            }
+            val cut = oldMessages.size - kept
+            if (cut in 1 until oldMessages.size) {
+                listOf(
+                    ChatMessage.user("[${cut} older message(s) omitted from the summarization input]") ,
+                ) + oldMessages.drop(cut)
+            } else oldMessages
+        }
         val transcript = buildString {
             if (priorSummary.isNotBlank()) {
                 appendLine("Existing summary (preserve and update it):")
@@ -42,13 +68,13 @@ object ConversationCompactor {
                 appendLine()
             }
             appendLine("Conversation to incorporate:")
-            oldMessages.forEachIndexed { index, message ->
+            capped.forEachIndexed { index, message ->
                 append("[${index + 1}] ${message.role}: ")
                 append(message.content.take(if (message.role == "tool") 6_000 else 12_000))
                 if (message.images.isNotEmpty()) append(" [${message.images.size} image(s) attached]")
                 if (message.toolCalls.isNotEmpty()) {
                     append(" [tool calls: ")
-                    append(message.toolCalls.joinToString { "${it.name}(${it.arguments})" })
+                    append(message.toolCalls.joinToString { "${it.name}(${it.arguments.take(500)})" })
                     append("]")
                 }
                 appendLine()
@@ -61,11 +87,14 @@ object ConversationCompactor {
                     "decisions, unresolved questions, important discoveries and file paths, completed " +
                     "changes, and any errors or pending work. Keep exact identifiers and commands " +
                     "when important. Do not invent facts. This memory replaces only the supplied " +
-                    "older messages; recent conversation will still be provided separately."
+                    "older messages; recent conversation will still be provided separately.",
             ),
             ChatMessage.user(transcript),
         )
     }
+
+    /** Global cap on the summarization transcript (chars ≈ tokens/4). ~90k tokens. */
+    private const val MAX_TRANSCRIPT_CHARS = 360_000
 
     /** Adds summary to the system prompt and omits only the represented leading chat messages. */
     fun applySummary(

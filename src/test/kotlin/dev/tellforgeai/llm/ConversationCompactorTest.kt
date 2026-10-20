@@ -70,9 +70,43 @@ class ConversationCompactorTest {
         assertFalse(input[1].content.contains("secret-payload"))
     }
 
+    // --- bounded summarization input ---
+
     @Test
-    fun `compaction only advances after a full user boundary and never selects inside tool loop`() {
-        val messages = listOf(
+    fun `summarization input truncates tool call arguments`() {
+        val hugeArgs = ToolCall("c1", "read_file", "{\"path\": \"" + "a".repeat(20_000) + "\"}")
+        val input = ConversationCompactor.summarizationMessages(
+            listOf(ChatMessage.assistantWithToolCalls("", listOf(hugeArgs))), "",
+        )
+        assertTrue(input[1].content.contains("read_file"))
+        assertFalse("arguments leaked untruncated", input[1].content.length > 25_000)
+    }
+
+    @Test
+    fun `summarization input drops oldest messages beyond the transcript cap with a note`() {
+        // Each message: content ~ 200k chars ⇒ two already exceed the 360k cap.
+        val big = "b".repeat(200_000)
+        val old = listOf(
+            ChatMessage.user("u0 $big"),
+            ChatMessage.assistant("a0 $big"),
+            ChatMessage.user("u1 small and recent"),
+        )
+        val input = ConversationCompactor.summarizationMessages(old, "")
+        assertTrue(input[1].content.contains("older message(s) omitted"))
+        assertTrue(input[1].content.contains("u1 small and recent"))
+        assertFalse(input[1].content.contains("u0 $big"))
+    }
+
+    @Test
+    fun `summarization input stays intact when under the cap`() {
+        val old = listOf(ChatMessage.user("small"), ChatMessage.assistant("answer"))
+        val input = ConversationCompactor.summarizationMessages(old, "")
+        assertFalse(input[1].content.contains("omitted"))
+        assertTrue(input[1].content.contains("small"))
+    }
+
+    @Test
+    fun `compaction only advances after a full user boundary and never selects inside tool loop`() {        val messages = listOf(
             ChatMessage.user("initial"),
             ChatMessage.assistantWithToolCalls("", listOf(ToolCall("c", "read_file", "{}"))),
             ChatMessage.toolResult("c", "result"),

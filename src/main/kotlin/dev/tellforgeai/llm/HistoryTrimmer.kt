@@ -36,15 +36,43 @@ object HistoryTrimmer {
         "[older tool result omitted to fit the context window]"
 
     /**
+     * Result of fitting a message list into a token budget.
+     *
+     * [fitsFully] is false when the untrimmable remainder (system prompt,
+     * original task, current turn) alone exceeds [budget] — callers should
+     * warn rather than send a prompt they know the provider may reject.
+     */
+    data class FitResult(
+        val messages: List<ChatMessage>,
+        val fitsFully: Boolean,
+        val removedMessages: Int,
+    )
+
+    /**
      * Returns a message list whose estimated token count is within [budget]
      * when possible. Never mutates the input list or its messages.
      */
-    fun fit(messages: List<ChatMessage>, budget: Int): List<ChatMessage> {
-        if (messages.sumOf { it.estimatedTokens() } <= budget) return messages
+    fun fit(messages: List<ChatMessage>, budget: Int): List<ChatMessage> =
+        fitResult(messages, budget).messages
 
+    /**
+     * Like [fit] but documents intent: used when fitting summarize inputs,
+     * where the newest turns of the region must survive. Dropping the OLDEST
+     * units first (fit's direction) already keeps the tail, so this is an
+     * alias for [fit].
+     */
+    fun fitFromEnd(messages: List<ChatMessage>, budget: Int): List<ChatMessage> =
+        fitResult(messages, budget).messages
+
+    /** [fit] with full outcome reporting. */
+    fun fitResult(messages: List<ChatMessage>, budget: Int): FitResult {
+        if (messages.sumOf { it.estimatedTokens() } <= budget) {
+            return FitResult(messages, fitsFully = true, removedMessages = 0)
+        }
         val protected = protectedIndices(messages)
         val out = messages.map { it.copy() }.toMutableList()
         var total = out.sumOf { it.estimatedTokens() }
+        var removed = 0
 
         // Pass 1: blank out old tool-result contents, oldest first.
         for (i in out.indices) {
@@ -58,21 +86,43 @@ object HistoryTrimmer {
             }
         }
 
-        // Pass 2: drop droppable units, oldest first. Old user messages are
-        // kept (small, and they anchor each turn), so after each removal the
+        // Pass 2: drop droppable units. Old user messages are kept at first
+        // (small, and they anchor each turn), so after each removal the
         // protected set — system prompt, first user message, and everything
         // from the last user message onward — is recomputed against the
-        // shrinking list by structural scan.
+        // shrinking list by structural scan. [fromEnd] only flips WHICH
+        // droppable unit is picked first; protection is identical.
         while (total > budget) {
             val prot = reindexedProtection(out)
             val drop = firstDroppableUnit(out, prot)
             if (drop == null) break // nothing more can be removed
-            val removed = (drop.first until drop.last + 1)
+            val size = drop.last - drop.first + 1
+            val removedTokens = (drop.first until drop.last + 1)
                 .sumOf { out[it].estimatedTokens() }
             out.subList(drop.first, drop.last + 1).clear()
-            total -= removed
+            total -= removedTokens
+            removed += size
         }
-        return out
+
+        // Pass 3 (last resort): drop MIDDLE old user messages — the "small
+        // anchors" assumption fails when a user message carried a huge paste
+        // or image. The first user message (original task) and the last
+        // non-synthetic user's turn stay protected; a user message is
+        // dropped only when it is not in the protected set.
+        while (total > budget) {
+            val prot = reindexedProtection(out)
+            val drop = out.indices.firstOrNull { out[it].role == "user" && it !in prot }
+            if (drop == null) break
+            val tokens = out[drop].estimatedTokens()
+            out.removeAt(drop)
+            total -= tokens
+            removed++
+        }
+        return FitResult(
+            messages = out,
+            fitsFully = out.sumOf { it.estimatedTokens() } <= budget,
+            removedMessages = removed,
+        )
     }
 
     /** Indices that must never be trimmed: system prompt, first user message, current turn. */
@@ -81,7 +131,7 @@ object HistoryTrimmer {
         if (messages.isNotEmpty() && messages[0].role == "system") {
             messages.indexOfFirst { it.role == "user" }.takeIf { it >= 0 }?.let { set.add(it) }
         }
-        messages.indexOfLast { it.role == "user" }.takeIf { it >= 0 }?.let { last ->
+        messages.indexOfLast { it.role == "user" && !it.synthetic }.takeIf { it >= 0 }?.let { last ->
             (last until messages.size).forEach { set.add(it) }
         }
         return set
@@ -90,11 +140,14 @@ object HistoryTrimmer {
     /**
      * Protection against the shrinking output list, by structural scan:
      * index 0 (system prompt), the first user message, and everything
-     * from the last user message onward (the current turn).
+     * from the last non-synthetic user message onward (the current turn).
+     * Engine-injected prompts ("Tool loop stopped… give a final answer now")
+     * are synthetic: they must not extend turn protection, or the huge
+     * tool loop that preceded them becomes untrimmable.
      */
     private fun reindexedProtection(out: List<ChatMessage>): Set<Int> {
         val prot = mutableSetOf(0, out.indexOfFirst { it.role == "user" }.coerceAtLeast(0))
-        out.indexOfLast { it.role == "user" }.takeIf { it >= 0 }?.let { last ->
+        out.indexOfLast { it.role == "user" && !it.synthetic }.takeIf { it >= 0 }?.let { last ->
             (last until out.size).forEach { prot.add(it) }
         }
         return prot

@@ -246,6 +246,12 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private val inputArea = JTextArea(3, 40)
     private val sendStopButton = JButton("Send")
+    /** Manual compaction: summarize older turns now, regardless of the 80% auto gate. */
+    private val compactButton = JButton(AllIcons.Actions.Preview).apply {
+        toolTipText = "Compact now — summarize older conversation turns into a memory block (frees context now)"
+        isFocusable = false
+        putClientProperty("JButton.buttonType", "toolBarButton")
+    }
     /** Sticky header: shows the first user message of the current chat. */
     private val firstMessageLabel = JLabel().apply {
         font = font.deriveFont(java.awt.Font.BOLD)
@@ -490,6 +496,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         inputArea.toolTipText = ENTER_TO_SEND_TIP
         installEnterToSend(inputArea) { send() }
         sendStopButton.addActionListener { if (streaming) stop() else send() }
+        compactButton.addActionListener { compactNow() }
+        compactButton.isEnabled = false
         val sendColumn = JPanel(BorderLayout(0, 6)).apply {
             isOpaque = false
             add(sendStopButton, BorderLayout.NORTH)
@@ -499,6 +507,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             }
             add(radios, BorderLayout.SOUTH)
             add(askPermissionCheckBox, BorderLayout.CENTER)
+            val tools = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 4, 0)).apply {
+                isOpaque = false
+                add(compactButton)
+            }
+            add(tools, BorderLayout.EAST)
         }
         val bottom = JPanel(BorderLayout(8, 0)).apply {
             border = JBUI.Borders.empty(6, 12, 12, 12)
@@ -969,10 +982,17 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                         userBubbleBg,
                     )
                 )
-                "assistant" -> if (m.content.isNotBlank()) {
-                    finishedBlocks.add(bubble("Assistant", markdownToHtml(m.content), assistantBubbleBg))
-                } else if (m.toolCalls.isNotEmpty()) {
-                    m.toolCalls.forEach { appendToolResult(it, "(from earlier session)") }
+                "assistant" -> when {
+                    m.content.isNotBlank() -> finishedBlocks.add(
+                        bubbleWithReasoningMeter("Assistant", m, markdownToHtml(m.content), assistantBubbleBg),
+                    )
+                    m.toolCalls.isNotEmpty() ->
+                        m.toolCalls.forEach { appendToolResult(it, "(from earlier session)") }
+                    m.reasoning.isNotBlank() ->
+                        // Reasoning-only persisted block (blank-text round or a
+                        // failed turn): show the "N KB reasoned" line so the
+                        // thinking meter survives reopening the chat.
+                        finishedBlocks.add(reasoningBubble(m.reasoning))
                 }
                 "tool" -> { /* tool results are folded into the following turn; skip */ }
             }
@@ -1023,6 +1043,15 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             lastAssistantMarkdown.setLength(0)
             lastAssistantMarkdown.append(partial)
             repaintTranscript()
+        } else {
+            // Mid-round with thinking streamed but no answer text yet: restore
+            // the live "N KB reasoned" meter so reopening during a reasoning
+            // phase doesn't drop the counter to 0 KB.
+            engine.reasoningTextSnapshot().takeIf { it.isNotEmpty() }?.let { r ->
+                lastReasoning.setLength(0)
+                lastReasoning.append(r)
+                repaintTranscript()
+            }
         }
     }
 
@@ -1420,6 +1449,23 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         withImagesInLastUserMessage(images + referencedImages, referencedPaths)
     }
 
+    /**
+     * Manual "Compact now": delegates to the current chat's engine, which
+     * runs the same summarization pipeline as auto-compaction, bypassing the
+     * 80%-of-window trigger. Disabled while a turn is streaming.
+     */
+    private fun compactNow() {
+        val chatId = currentChatId ?: return
+        if (streaming || runs.isRunning(chatId)) return
+        val profile = selectedProfile() ?: run {
+            Messages.showInfoMessage(project, "Add a provider first (gear icon).", "TellForgeAI")
+            return
+        }
+        persistProfileChoice(profile)
+        engineFor(chatId).compactNow(profile)
+        refreshChatList()
+    }
+
     /** Attaches pasted/referenced images to the message the engine just appended. */
     private fun withImagesInLastUserMessage(images: List<String>, referencedPaths: List<String>) {
         if (images.isEmpty() && referencedPaths.isEmpty()) return
@@ -1636,6 +1682,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         streaming = s
         sendStopButton.text = if (s) "Stop" else "Send"
         inputArea.isEnabled = !s
+        compactButton.isEnabled = !s && currentChatId != null
         if (s) {
             thinkingDots = 0
             thinkingTimer.start()
@@ -1774,8 +1821,8 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         // ("Thinking · glm — 12.4 KB reasoned") instead of dumping the text.
         lastReasoning.isNotEmpty() -> bubble(
             "Thinking · ${esc(profileLabel())}",
-            "<div style='color:#8a8a8a;font-style:italic'>%.1f KB reasoned<span>%s</span></div>"
-                .format(lastReasoning.length / 1024.0, ".".repeat(thinkingDots)),
+            "<div style='color:#8a8a8a;font-style:italic'>${formattedKbReasoned(lastReasoning.length)}<span>%s</span></div>"
+                .format(".".repeat(thinkingDots)),
             assistantBubbleBg,
         )
         // Waiting for the first streamed token: show an animated "Thinking…" status.
@@ -1973,6 +2020,30 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             "<div class='who'>$who</div><div>$bodyHtml</div>" +
             "</td></tr></table>" +
             "<table width='100%' cellpadding=0 cellspacing=0><tr><td style='font-size:6px'>&nbsp;</td></tr></table>"
+
+    /**
+     * Assistant bubble with a compact "N KB reasoned" note appended to the
+     * header when the persisted message carries model thinking — so the meter
+     * shows the same value after reopening the chat as it did live.
+     */
+    private fun bubbleWithReasoningMeter(who: String, msg: ChatMessage, bodyHtml: String, bg: Color): String =
+        bubble(withReasoningMeter(who, msg.reasoning), bodyHtml, bg)
+
+    private fun withReasoningMeter(who: String, reasoning: String): String = when {
+        reasoning.isBlank() -> who
+        else -> "$who · " + formattedKbReasoned(reasoning.length)
+    }
+
+    /** "N KB reasoned" meter line for a persisted reasoning-only block. */
+    private fun reasoningBubble(reasoning: String): String = bubble(
+        "Thinking",
+        "<div style='color:#8a8a8a;font-style:italic'>${formattedKbReasoned(reasoning.length)}</div>",
+        assistantBubbleBg,
+    )
+
+    /** Kilobytes of reasoning, formatted like the live streaming meter ("0,9 KB reasoned"). */
+    private fun formattedKbReasoned(chars: Int): String =
+        "%.1f KB reasoned".format(chars / 1024.0)
 
     private fun hex(c: Color): String =
         String.format("#%02x%02x%02x", c.red, c.green, c.blue)

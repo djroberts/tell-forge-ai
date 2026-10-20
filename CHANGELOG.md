@@ -4,6 +4,26 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.0] - 2026-11-02
+
+### Added
+- "Compact now" button next to the Send button: summarize older conversation turns into a memory block immediately, without waiting for the automatic 80%-of-window trigger (ui/chat)
+
+### Changed
+- Conversation compaction now pre-fits the summarize request into its own token budget, so compacting a very large chat no longer produces a request that can exceed the model's context window; on failure it retries once with a smaller history chunk before falling back (chat)
+- Compaction summarize inputs truncate tool-call arguments and cap the total transcript, dropping the oldest messages with an explicit omitted-noted line (llm)
+
+### Fixed
+- Pressing Stop while context compaction was running left the chat showing "running" forever; the turn now ends correctly (chat)
+- Trimming can now drop large middle user messages as a last resort, so a huge paste or screenshot no longer makes the prompt unfittable; the original task and the current turn stay protected (llm)
+- The engine-injected "Tool loop stopped…" prompt no longer shields the whole preceding tool loop from trimming (llm)
+- When the trimmed prompt is still estimated above the context window, a clear warning is now shown instead of sending a request the provider will likely reject (chat)
+
+## [0.16.1] - 2026-11-02
+
+### Fixed
+- Model thinking ("N KB reasoned") is no longer discarded at the end of a turn: reasoning text is persisted per assistant message, so reopening a chat (or restarting the IDE) shows the correct KB figure instead of resetting it to 0 KB, and no reasoning text is lost — including stopped, errored and tool-loop rounds (chat/ui)
+
 ## [0.16.0] - 2026-10-19
 
 ### Added

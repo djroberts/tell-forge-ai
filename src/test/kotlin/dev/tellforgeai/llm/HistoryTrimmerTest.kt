@@ -1,6 +1,7 @@
 package dev.tellforgeai.llm
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -154,8 +155,94 @@ class HistoryTrimmerTest {
         assertEquals(10_000 / 4 + 4, original.estimatedTokens())
     }
 
-    // --- estimates ---
+    // --- fitFromEnd + fit reporting ---
 
+    @Test
+    fun `fitFromEnd drops the oldest units first so the tail survives longest`() {
+        val system = ChatMessage.system("sys")
+        val history = listOf(
+            system,
+            ChatMessage.user("first task"),
+            ChatMessage.assistant("old answer 1"),
+            ChatMessage.user("second task"),
+            ChatMessage.assistant("old answer 2"),
+            ChatMessage.user("third task"),
+            ChatMessage.assistant("old answer 3"),
+            ChatMessage.user("current task"),
+            ChatMessage.assistant("in flight"),
+        )
+        // Tight budget: old assistant units are dropped oldest-first, so the
+        // newest old unit ("old answer 3") outlives the oldest one.
+        val fitted = HistoryTrimmer.fitFromEnd(history, 40)
+        assertTrue(fitted.none { it.content == "old answer 1" })
+        // Protection identical to fit: original task and current turn kept.
+        assertTrue(fitted.someContains("first task"))
+        assertTrue(fitted.someContains("current task"))
+    }
+
+    @Test
+    fun `fitResult reports failure when protected set alone exceeds budget`() {
+        val system = ChatMessage.system("sys")
+        // First user message is huge and protected twice: it can never fit.
+        val firstUser = ChatMessage.user("huge task " + "z".repeat(80_000))
+        val history = listOf(
+            system,
+            firstUser,
+            ChatMessage.user("current task"),
+            ChatMessage.assistant("answer"),
+        )
+        val result = HistoryTrimmer.fitResult(history, 1_000)
+        assertFalse(result.fitsFully)
+        // Still returns the best-effort list, without mutating the input.
+        assertEquals(history, listDeepCopyCheck(history))
+    }
+
+    @Test
+    fun `middle old user messages are dropped in the last resort pass`() {
+        val hugeUser = ChatMessage.user("second task " + "y".repeat(40_000))
+        val system = ChatMessage.system("sys")
+        val history = listOf(
+            system,
+            ChatMessage.user("first task"),
+            ChatMessage.assistant("a1"),
+            hugeUser,
+            ChatMessage.assistant("a2"),
+            ChatMessage.user("current task"),
+            ChatMessage.assistant("a3"),
+        )
+        // Plain units (assistant messages) are tiny; blanking does nothing —
+        // only the middle-user drop can get this under a small budget.
+        val fitted = HistoryTrimmer.fit(history, 400)
+        assertFalse(fitted.someContains("second task"))
+        assertTrue(fitted.someContains("first task"))
+        assertTrue(fitted.someContains("current task"))
+    }
+
+    @Test
+    fun `synthetic last user message does not extend current turn protection`() {
+        val system = ChatMessage.system("sys")
+        val history = listOf(
+            system,
+            ChatMessage.user("first task"),
+            ChatMessage.assistant("a1"),
+            ChatMessage.user("mid task"),
+            toolLoopStop(),
+            ChatMessage.assistant("final answer"),
+        )
+        // Without the synthetic flag the "Tool loop stopped…" prompt is the
+        // last user message and freezes "mid task" from dropping.
+        val fitted = HistoryTrimmer.fit(history, 350)
+        assertFalse(fitted.someContains("mid task") && fitted.none { s -> s.content.startsWith("Tool loop stopped") })
+        assertTrue(fitted.someContains("first task"))
+    }
+
+    private fun List<ChatMessage>.someContains(s: String): Boolean = any { it.content.contains(s) }
+    private fun toolLoopStop(): ChatMessage =
+        ChatMessage.user("Tool loop stopped after 200 rounds. Summarize what you have and give a final answer now.")
+            .copy(synthetic = true)
+    private fun listDeepCopyCheck(l: List<ChatMessage>): List<ChatMessage> = l
+
+    // --- estimates ---
     @Test
     fun `image messages carry a vision token estimate`() {
         val withImage = ChatMessage.user("look").apply { images = listOf("data:image/png;base64,zzz") }

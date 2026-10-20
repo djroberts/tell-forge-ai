@@ -132,6 +132,7 @@ class ChatEngine(
         compactionFailedForCurrentTurn = false
         streamingText.setLength(0)
         reasoningText.setLength(0)
+        pendingReasoning = ""
         startTurn()
     }
 
@@ -140,6 +141,52 @@ class ChatEngine(
         if (!running) return
         stopped = true
         client.cancel()
+    }
+
+    /**
+     * Manual "Compact now": forces a compaction run even when the automatic
+     * (80% of window) gate hasn't triggered — for chats the user knows are
+     * bloated or whose provider is rejecting large prompts. Runs offline
+     * relative to turns: refuses while a turn is streaming, persists the
+     * same way auto-compaction does.
+     */
+    fun compactNow(provider: ProviderProfile) {
+        if (running || compactionInProgress) return
+        val chat = chat() ?: return
+        turnPlanMode = false
+        profile = provider
+        contextSummary = chat.contextSummary
+        compactedMessageCount = chat.compactedMessageCount.coerceIn(0, chat.messages.size)
+        running = false
+        stopped = false
+        lastTurnFailed = false
+        toolRounds = 0
+        lastPromptTokens = Int.MAX_VALUE / 2 // force shouldCompact() in startTurn
+        contextTrimNotified = false
+        compactionInProgress = false
+        compactionFailedForCurrentTurn = false
+        val system = ChatMessage.system(
+            Prompts.system(false, projectContext(), instructionsLayer()),
+        )
+        val window = contextWindow(provider) ?: (ContextGuard.RESERVE_TOKENS * 8)
+        val boundary = ConversationCompactor.boundary(
+            chat.messages,
+            compactedMessageCount,
+            system.estimatedTokens() + contextSummary.length / 4 +
+                (chat.messages.firstOrNull { it.role == "user" }?.estimatedTokens() ?: 0),
+            window,
+        ) ?: run {
+            listener.onSystem("Nothing to compact — the history already fits below the compaction target.")
+            return
+        }
+        if (boundary <= compactedMessageCount) {
+            listener.onSystem("Nothing new to compact — all completed turns are already summarized.")
+            return
+        }
+        compactionInProgress = true
+        listener.onSystem("ℹ Compacting older conversation turns…")
+        val oldMessages = chat.messages.subList(compactedMessageCount, boundary).map { it.copy() }
+        runCompaction(provider, boundary, oldMessages)
     }
 
     /** Releases connector jobs; called on project/tool-window dispose. */
@@ -170,29 +217,7 @@ class ChatEngine(
             compactionInProgress = true
             val oldMessages = (chat()?.messages ?: emptyList())
                 .subList(compactedMessageCount.coerceIn(0, boundary), boundary)
-            val summaryInput = ConversationCompactor.summarizationMessages(oldMessages, contextSummary)
-            client.summarize(provider, turnPlanMode, summaryInput, (window!! * 0.12).toInt()) { result ->
-                ApplicationManager.getApplication().invokeLater {
-                    compactionInProgress = false
-                    if (stopped) return@invokeLater
-                    result.fold(
-                        onSuccess = { summary ->
-                            contextSummary = summary
-                            compactedMessageCount = boundary
-                            compactionFailedForCurrentTurn = false
-                            persistChat()
-                            listener.onSystem("ℹ Older conversation turns were compacted into a summary for future model requests; the full chat transcript is unchanged.")
-                            lastPromptTokens = 0
-                        },
-                        onFailure = { error ->
-                            LOG.warn("TellForgeAI conversation compaction failed; using normal history trimming", error)
-                            compactionFailedForCurrentTurn = true
-                            lastPromptTokens = 0
-                        },
-                    )
-                    startTurn()
-                }
-            }
+            runCompaction(provider, boundary, oldMessages)
             return
         }
         val chat = chat() ?: run { running = false; lastTurnFailed = true; listener.onTurnEnded(false); return }
@@ -201,9 +226,22 @@ class ChatEngine(
         )
         val budget = tokenBudget(provider)
         val messages = if (budget != null) {
-            val fitted = HistoryTrimmer.fit(summarizedMessages, budget)
-            if (ContextGuard.wasTrimmed(summarizedMessages, fitted)) contextTrimNotice(fitted.size, summarizedMessages.size)
-            fitted
+            val fitted = HistoryTrimmer.fitResult(summarizedMessages, budget)
+            if (ContextGuard.wasTrimmed(summarizedMessages, fitted.messages)) contextTrimNotice(fitted.messages.size, summarizedMessages.size)
+            if (!fitted.fitsFully) {
+                // Protected remainder (system prompt + project context +
+                // original task + current turn) alone exceeds the budget —
+                // the provider will likely reject this request. Warn instead
+                // of sending blindly; the turn still runs in case the
+                // estimated window was pessimistic.
+                listener.onSystem(
+                    "⚠ Prompt still exceeds the estimated context window after trimming " +
+                        "(${fitted.messages.sumOf { it.estimatedTokens() }} > $budget tokens estimated). " +
+                        "The provider may reject this request — consider a new chat or a larger-window model.",
+                )
+                LOG.warn("TellForgeAI: outgoing prompt estimated above the token budget after trimming")
+            }
+            fitted.messages
         } else {
             summarizedMessages
         }
@@ -232,6 +270,16 @@ class ChatEngine(
                     is LlmClient.Event.Error -> {
                         lastTurnFailed = true
                         finalizeAssistantBlock()
+                        // finalizeAssistantBlock keeps reasoning in pendingReasoning
+                        // when its answer text was blank; a failed round's thinking
+                        // must still reach persistence (nothing lost).
+                        if (pendingReasoning.isNotBlank()) {
+                            addToMessages {
+                                it += ChatMessage.assistant("").copy(reasoning = pendingReasoning)
+                            }
+                            pendingReasoning = ""
+                            persistChat()
+                        }
                         listener.onSystem("Error: ${event.message}")
                         endTurn()
                     }
@@ -249,6 +297,70 @@ class ChatEngine(
     /** Per-request prompt-token budget, null when no window is known. */
     private fun tokenBudget(provider: ProviderProfile): Int? =
         contextWindow(provider)?.let { it - ContextGuard.RESERVE_TOKENS }
+
+    /**
+     * Fits the summarization input into its own budget (the summarize call is
+     * itself an LLM request and must fit the window), then sends it.
+     *
+     * Inputs are trimmed keeping the TAIL of the region (fitFromEnd semantics
+     * are inside the per-message truncation of [ConversationCompactor] plus
+     * [HistoryTrimmer]): the newest old turns are the most valuable. If the
+     * fitted input was still over budget and the summarize call failed, one
+     * additional reduced pass is attempted before degrading to normal
+     * trimming — never an infinite retry.
+     */
+    private fun runCompaction(
+        provider: ProviderProfile,
+        boundary: Int,
+        oldMessages: List<ChatMessage>,
+        passesLeft: Int = 1,
+    ) {
+        val window = contextWindow(provider)
+        val summarizeBudget = window?.let { it - ContextGuard.RESERVE_TOKENS - (it * 0.12).toInt() }
+            ?: DEFAULT_SUMMARIZE_BUDGET
+        val maxTokens = window?.let { (it * 0.12).toInt() }?.coerceAtLeast(512) ?: 3_000
+        val summaryInput = ConversationCompactor.summarizationMessages(oldMessages, contextSummary)
+        val fitted = HistoryTrimmer.fitResult(summaryInput, summarizeBudget)
+        client.summarize(provider, turnPlanMode, fitted.messages, maxTokens) { result ->
+            ApplicationManager.getApplication().invokeLater {
+                compactionInProgress = false
+                if (stopped) {
+                    endTurn()
+                    return@invokeLater
+                }
+                result.fold(
+                    onSuccess = { summary ->
+                        contextSummary = summary
+                        compactedMessageCount = boundary
+                        compactionFailedForCurrentTurn = false
+                        persistChat()
+                        listener.onSystem("ℹ Older conversation turns were compacted into a summary for future model requests; the full chat transcript is unchanged.")
+                        lastPromptTokens = 0
+                    },
+                    onFailure = { error ->
+                        LOG.warn("TellForgeAI conversation compaction failed; using normal history trimming", error)
+                        if (passesLeft > 0 && !fitted.fitsFully) {
+                            // The summarize request itself was likely still
+                            // over the window. One reduced retry: only the
+                            // first half of the region is summarized.
+                            listener.onSystem("ℹ Compaction retrying with a smaller history chunk.")
+                            runCompaction(
+                                provider, boundary, oldMessages.take(oldMessages.size / 2),
+                                passesLeft = 0,
+                            )
+                            return@invokeLater
+                        }
+                        compactionFailedForCurrentTurn = true
+                        lastPromptTokens = 0
+                    },
+                )
+                startTurn()
+            }
+        }
+    }
+
+    /** Budget for the summarize request when no window is known (≈ 32k tokens). */
+    private val DEFAULT_SUMMARIZE_BUDGET = 32_000
 
     private fun contextWindow(provider: ProviderProfile): Int? {
         val chat = chat()
@@ -297,7 +409,10 @@ class ChatEngine(
             val streamedSomething = streamingText.isNotEmpty()
             finalizeAssistantBlock()
             if (event.fullText.isNotBlank() && !streamedSomething) {
-                addToMessages { it += ChatMessage.assistant(event.fullText) }
+                addToMessages {
+                    it += ChatMessage.assistant(event.fullText).copy(reasoning = pendingReasoning)
+                }
+                pendingReasoning = ""
             }
             persistChat()
             endTurn()
@@ -311,12 +426,15 @@ class ChatEngine(
             listener.onSystem("Stopped after $MAX_TOOL_ROUNDS tool rounds to avoid an endless loop. " +
                 "Press Send to let it continue.")
             if (event.fullText.isNotBlank() && !streamedSomething) {
-                addToMessages { it += ChatMessage.assistant(event.fullText) }
+                addToMessages {
+                    it += ChatMessage.assistant(event.fullText).copy(reasoning = pendingReasoning)
+                }
+                pendingReasoning = ""
             }
             addToMessages {
                 it += ChatMessage.user(
                     "Tool loop stopped after $MAX_TOOL_ROUNDS rounds. Summarize what you have and give a final answer now."
-                )
+                ).copy(synthetic = true)
             }
             persistChat()
             endTurn()
@@ -347,7 +465,17 @@ class ChatEngine(
         // streamed no preamble text, otherwise the next round sends a
         // function_call_output with no matching function_call (HTTP 400,
         // "No tool call found for function call output", on /v1/responses).
-        addToMessages { it += ChatMessage.assistantWithToolCalls(event.fullText, event.toolCalls) }
+        // The round's reasoning travels with it: captured here when the
+        // preamble finalize didn't run for this path.
+        if (reasoningText.isNotEmpty() && pendingReasoning.isBlank()) {
+            pendingReasoning = reasoningText.toString()
+            reasoningText.setLength(0)
+        }
+        addToMessages {
+            it += ChatMessage.assistantWithToolCalls(event.fullText, event.toolCalls)
+                .copy(reasoning = pendingReasoning)
+        }
+        pendingReasoning = ""
         persistChat()
         val calls = event.toolCalls
         calls.forEach { listener.onToolPending(it) }
@@ -429,21 +557,34 @@ class ChatEngine(
         }
         streamingText.setLength(0)
         reasoningText.setLength(0)
+        pendingReasoning = ""
         listener.onTurnEnded(wasStopped)
     }
 
     /**
      * Persists the in-flight assistant message: the accumulated streaming text
-     * becomes a history entry if it has content.
+     * becomes a history entry if it has content. The accumulated reasoning
+     * travels with it (kept even when the answer text is blank — an assistant
+     * block that requested tool calls may still have streamed thinking first,
+     * and dropping it there lost the KB counter for that round).
      */
     private fun finalizeAssistantBlock() {
         val md = streamingText.toString()
         streamingText.setLength(0)
+        val reasoning = reasoningText.toString()
         reasoningText.setLength(0)
+        // Blank answer text: nothing to persist here — the reasoning stays in
+        // [reasoning] and is re-exposed to onTurnDone via [pendingReasoning]
+        // so the tool-call message can still carry it.
+        pendingReasoning = reasoning
         if (md.isBlank()) return
-        addToMessages { it += ChatMessage.assistant(md) }
+        pendingReasoning = ""
+        addToMessages { it += ChatMessage.assistant(md).copy(reasoning = reasoning) }
         persistChat()
     }
+
+    /** Reasoning captured by [finalizeAssistantBlock] that has not yet been persisted. */
+    private var pendingReasoning = ""
 
     private fun addToMessages(block: (MutableList<ChatMessage>) -> Unit) {
         val chat = chat() ?: return
@@ -466,6 +607,9 @@ class ChatEngine(
 
     /** Text streamed so far in the in-flight assistant message ("" when idle). */
     fun streamingTextSnapshot(): String = streamingText.toString()
+
+    /** Reasoning text streamed so far in the in-flight assistant message. */
+    fun reasoningTextSnapshot(): String = reasoningText.toString()
 
     companion object {
         /** Max tool request/execute/feedback rounds per user turn. */
