@@ -134,7 +134,12 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
                     override fun onUsageRecorded() {
                         // Only meaningful for the visible chat; cheap enough to run anyway.
-                        if (chatId == currentChatId) updateStickyHeader()
+                        if (chatId == currentChatId) {
+                            runs.engine(chatId)?.let { engine ->
+                                if (engine.lastPromptTokens > 0) lastPromptTokens = engine.lastPromptTokens
+                            }
+                            updateStickyHeader()
+                        }
                     }
 
                     override fun onTurnEnded(stopped: Boolean) {
@@ -952,7 +957,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         compactionFailedForCurrentTurn = false
         contextSummary = chat.contextSummary
         compactedMessageCount = chat.compactedMessageCount.coerceIn(0, chat.messages.size)
-        lastPromptTokens = 0
+        // Seed the meter with the actual prompt estimate until this chat's
+        // engine reports the provider's next real usage (openChat does the same).
+        runs.engine(chatId)?.let { engine ->
+            if (engine.lastPromptTokens > 0) lastPromptTokens = engine.lastPromptTokens
+        }
         toolRounds = 0
         chatModelInfoLabel.text = modelInfoLabel.text
         chatModelInfoLabel.toolTipText = modelInfoLabel.toolTipText
@@ -1953,8 +1962,19 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         val chat = id?.let { TellForgeAIChatsState.getInstance(project).get(it) }
         if (id == null) (profileCombo.selectedItem as? ProviderProfile)?.let { ensureModelInfo(it) }
         val used = maxOf(estimateUsedTokens(), lastPromptTokens)
-        val configuredWindow = TellForgeAIProjectState.getInstance(project).selectedProfile()?.contextWindow ?: 128_000
-        val window = chat?.contextWindow?.takeIf { it > 0 } ?: configuredWindow
+        // Resolve the window exactly like the engine does (ContextGuard), so
+        // the meter and near-full warnings can't disagree about which window
+        // applies.
+        val profileWindow = TellForgeAIProjectState.getInstance(project).selectedProfile()
+            ?.contextWindow?.takeIf { it > 0 }
+        val activeModel = (profileCombo.selectedItem as? ProviderProfile)
+            ?.modelFor(mode == Mode.PLAN)?.trim().orEmpty()
+        val window = dev.tellforgeai.llm.ContextGuard.contextWindow(
+            chatWindow = chat?.contextWindow,
+            chatModel = chat?.contextModel,
+            activeModel = activeModel,
+            profileWindow = profileWindow,
+        ) ?: 128_000
         contextBar.value = ((used.toDouble() / window) * 1000).toInt().coerceIn(0, 1000)
         contextLabel.text = "${formatTokens(used)} / ${formatTokens(window)}"
         val inTokens = chat?.incomingTokens ?: 0L

@@ -4,6 +4,12 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.3] - 2026-11-02
+
+### Fixed
+- The context usage meter now reflects the provider-reported prompt size instead of showing an underestimate while the engine warned that the context was nearly full (ui/chat)
+- The usage meter and the near-full warning now resolve the context window through the same logic, so they can no longer disagree about which model's window applies (ui)
+
 ## [0.17.2] - 2026-11-02
 
 ### Fixed

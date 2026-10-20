@@ -150,7 +150,10 @@ class ChatEngine(
     private var contextSummary = ""
     private var compactedMessageCount = 0
     private var toolRounds = 0
-    private var lastPromptTokens = 0
+    /** Estimated current-turn prompt tokens (see [send]). */
+    @Volatile
+    var lastPromptTokens = 0
+        private set
     private var contextTrimNotified = false
     private var compactionInProgress = false
     private var compactionFailedForCurrentTurn = false
@@ -176,13 +179,10 @@ class ChatEngine(
         chat.providerName = provider.name
         chat.updatedAt = System.currentTimeMillis()
         deps.chatsUpsert(chat)
-        // Prime the compaction trigger with an estimate of the actual prompt
-        // (history + summary): a freshly created engine (IDE restart, new
-        // session) starts with lastPromptTokens == 0 and would never compact
-        // a bloated chat. Lifetime usage is NOT used — a chat with a small
-        // history but huge cumulative token count must not compact every
-        // send. boundary() self-limits: it returns null once the history
-        // already fits below the compaction target.
+        // Prime the context meter with an estimate of the actual prompt
+        // (history + summary): a freshly created engine starts here at 0 and the
+        // provider-reported value only arrives on the first Done event. Lifetime
+        // usage is NOT used.
         lastPromptTokens = chat.messages.fold(0) { acc, m -> acc + m.estimatedTokens() } +
             chat.contextSummary.length / 4
         running = true
