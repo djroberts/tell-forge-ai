@@ -4,6 +4,14 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.1] - 2026-11-02
+
+### Added
+- Transient provider errors (rate limit, overloaded, gateway 5xx, network) are now automatically retried up to twice with bounded backoff; each attempt is announced in the chat with the failure kind and wait time (chat)
+
+### Fixed
+- A provider-reported context overflow now triggers one re-trim of the history at a 25% smaller budget instead of failing the turn, and is never retried blindly — deterministic errors (bad model, bad key) always surface immediately without burning credits (chat/llm)
+
 ## [0.17.0] - 2026-11-02
 
 ### Added

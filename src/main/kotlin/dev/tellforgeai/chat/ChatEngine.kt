@@ -9,6 +9,7 @@ import dev.tellforgeai.llm.ConversationCompactor
 import dev.tellforgeai.llm.estimatedTokens
 import dev.tellforgeai.llm.HistoryTrimmer
 import dev.tellforgeai.llm.LlmClient
+import dev.tellforgeai.llm.LlmErrors
 import dev.tellforgeai.llm.Prompts
 import dev.tellforgeai.llm.ToolCall
 import dev.tellforgeai.model.ChatSession
@@ -247,6 +248,40 @@ class ChatEngine(
         }
         streamingText.setLength(0)
         reasoningText.setLength(0)
+        streamWithRetry(provider, messages, budget, toolRound = null)
+    }
+
+    /**
+     * Streams one request with the safe-retry policy:
+     *
+     *  - classified TRANSIENT/GATEWAY/NETWORK errors are retried with
+     *    bounded exponential backoff (max [MAX_RETRIES]), surfaced to the
+     *    user between attempts;
+     *  - CONTEXT_TOO_LARGE triggers exactly one content fix: the same
+     *    messages re-trimmed with a 25% smaller budget (never a blind
+     *    resend of the identical prompt);
+     *  - INVALID/OTHER surface unchanged;
+     *  - no retry ever fires once a delta arrived (a mid-stream retry would
+     *    duplicate tokens), and every attempt stops when the user did.
+     *
+     * [budget] is the token budget used to fit [messages]; needed to
+     * re-trim on a context overflow. Null when no window is known (no
+     * content fix is then possible).
+     *
+     * [toolRound] is null for the first request of a turn and the round
+     * index for follow-up turns after tool results: a retry on a follow-up
+     * round is allowed too (the state is persisted and idempotent), but the
+     * content fix is not — re-trimming mid-turn could orphan the tool calls
+     * the round replied to.
+     */
+    private fun streamWithRetry(
+        provider: ProviderProfile,
+        messages: List<ChatMessage>,
+        budget: Int?,
+        toolRound: Int?,
+        attempt: Int = 1,
+    ) {
+        var sawDelta = false
         client.stream(provider, turnPlanMode, messages, ToolRegistry.specs(project, turnPlanMode)) { event ->
             // invoked on a background thread; marshal to the EDT
             ApplicationManager.getApplication().invokeLater {
@@ -259,6 +294,7 @@ class ChatEngine(
                 }
                 when (event) {
                     is LlmClient.Event.Delta -> {
+                        sawDelta = true
                         streamingText.append(event.text)
                         listener.onAssistantDelta(event.text)
                     }
@@ -268,24 +304,77 @@ class ChatEngine(
                     }
                     is LlmClient.Event.Done -> onTurnDone(event)
                     is LlmClient.Event.Error -> {
-                        lastTurnFailed = true
-                        finalizeAssistantBlock()
-                        // finalizeAssistantBlock keeps reasoning in pendingReasoning
-                        // when its answer text was blank; a failed round's thinking
-                        // must still reach persistence (nothing lost).
-                        if (pendingReasoning.isNotBlank()) {
-                            addToMessages {
-                                it += ChatMessage.assistant("").copy(reasoning = pendingReasoning)
+                        val kind = LlmErrors.classify(event.message)
+                        val canContentFix = kind == LlmErrors.Kind.CONTEXT_TOO_LARGE &&
+                            budget != null && toolRound == null && attempt == 1
+                        val canRetry = LlmErrors.retryable(kind) &&
+                            attempt <= MAX_RETRIES && !sawDelta
+                        when {
+                            canRetry -> {
+                                val wait = LlmErrors.backoffMs(attempt)
+                                listener.onSystem(
+                                    "⏳ ${kindLabel(kind)} (attempt $attempt failed) — retrying in ${wait / 1000}s…",
+                                )
+                                LOG.info("TellForgeAI: retrying stream after ${kindLabel(kind)}; attempt $attempt, wait ${wait}ms")
+                                Thread {
+                                    Thread.sleep(wait)
+                                    ApplicationManager.getApplication().invokeLater {
+                                        if (running && !stopped) {
+                                            streamWithRetry(provider, messages, budget, toolRound, attempt + 1)
+                                        } else {
+                                            endTurn()
+                                        }
+                                    }
+                                }.start()
                             }
-                            pendingReasoning = ""
-                            persistChat()
+                            canContentFix -> {
+                                val smaller = (budget * 0.75).toInt()
+                                listener.onSystem(
+                                    "⚠ Context overflow reported by the provider — re-trimming the history to ~$smaller tokens and retrying once.",
+                                )
+                                LOG.warn("TellForgeAI: provider reported context overflow; re-trimming once (budget $budget -> $smaller)")
+                                val refitted = HistoryTrimmer.fitResult(messages, smaller)
+                                if (refitted.messages.size == messages.size &&
+                                    refitted.messages.sumOf { it.estimatedTokens() } >= messages.sumOf { it.estimatedTokens() }
+                                ) {
+                                    // Already at the floor — re-trimming cannot help.
+                                    finishError(event)
+                                } else {
+                                    streamWithRetry(provider, refitted.messages, smaller, toolRound, attempt + 1)
+                                }
+                            }
+                            else -> finishError(event)
                         }
-                        listener.onSystem("Error: ${event.message}")
-                        endTurn()
                     }
                 }
             }
         }
+    }
+
+    /** Ends the turn with the raw error, after persisting accumulated reasoning. */
+    private fun finishError(event: LlmClient.Event.Error) {
+        lastTurnFailed = true
+        finalizeAssistantBlock()
+        // finalizeAssistantBlock keeps reasoning in pendingReasoning
+        // when its answer text was blank; a failed round's thinking
+        // must still reach persistence (nothing lost).
+        if (pendingReasoning.isNotBlank()) {
+            addToMessages {
+                it += ChatMessage.assistant("").copy(reasoning = pendingReasoning)
+            }
+            pendingReasoning = ""
+            persistChat()
+        }
+        listener.onSystem("Error: ${event.message}")
+        endTurn()
+    }
+
+    private fun kindLabel(kind: LlmErrors.Kind): String = when (kind) {
+        LlmErrors.Kind.TRANSIENT_RATE_LIMIT -> "Provider rate limit"
+        LlmErrors.Kind.TRANSIENT_OVERLOADED -> "Provider overloaded"
+        LlmErrors.Kind.GATEWAY -> "Provider gateway error"
+        LlmErrors.Kind.NETWORK -> "Network error"
+        else -> "Request failed"
     }
 
     private fun contextTrimNotice(keptMessages: Int, totalMessages: Int) {
@@ -616,5 +705,7 @@ class ChatEngine(
         private const val MAX_TOOL_ROUNDS = 200
         /** Max characters of a tool result fed back into the model history. */
         private const val MAX_TOOL_RESULT_CHARS = 8_000
+        /** Max automatic retries for transient stream errors (1s/2s backoff). */
+        private const val MAX_RETRIES = 2
     }
 }
