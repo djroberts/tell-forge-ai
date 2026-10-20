@@ -19,7 +19,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * [stream], [whenIdle], [cancel], [fetchContextWindow], [testConnection] and
  * [fetchModels] — each persisted-protocol-aware via [ApiProtocol.modelsPath].
  */
-class LlmClient {
+open class LlmClient {
 
     data class Usage(
         val promptTokens: Int,
@@ -65,7 +65,7 @@ class LlmClient {
     }
 
     /** Requests a non-streaming, tool-free summary using the same provider and selected mode model. */
-    fun summarize(
+    open fun summarize(
         profile: ProviderProfile,
         planMode: Boolean,
         messages: List<ChatMessage>,
@@ -140,7 +140,7 @@ class LlmClient {
         }
     }
 
-    fun stream(
+    open fun stream(
         profile: ProviderProfile,
         planMode: Boolean,
         history: List<ChatMessage>,

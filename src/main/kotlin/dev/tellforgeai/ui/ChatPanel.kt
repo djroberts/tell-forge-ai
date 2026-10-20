@@ -154,6 +154,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 requestApproval = ::requestApproval,
                 projectContext = ::buildProjectContext,
                 instructionsLayer = ::instructionsLayer,
+                deps = dev.tellforgeai.chat.ChatEngine.Deps(project),
             )
         }
 

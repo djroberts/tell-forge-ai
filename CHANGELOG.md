@@ -4,6 +4,13 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.2] - 2026-11-02
+
+### Fixed
+- Context compaction now triggers even on a freshly opened chat (after IDE start or chat re-open); previously a bloated chat could wait forever without ever compacting (chat)
+- The compaction summarize request is now always bounded to the context window: if the transcript alone exceeds the budget, its oldest content is head-truncated instead of sending an oversized request (chat)
+- A failed compaction attempt is now announced in the chat instead of silently falling back to trimming (chat)
+
 ## [0.17.1] - 2026-11-02
 
 ### Added

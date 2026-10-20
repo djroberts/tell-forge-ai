@@ -31,7 +31,7 @@ import dev.tellforgeai.tools.ToolRegistry
  * [ChatRunRegistry].
  */
 class ChatEngine(
-    private val project: Project,
+    private val project: Project?,
     val chatId: String,
     private val listener: Listener,
     /** Approval callbacks shared with the panel (modal dialogs on EDT). */
@@ -40,6 +40,12 @@ class ChatEngine(
     private val projectContext: () -> String,
     /** Instructions repo layer string (cached, non-EDT). */
     private val instructionsLayer: () -> String,
+    /**
+     * Injectable dependencies for tests. All accessors are lazy so a test can
+     * supply fakes without touching IntelliJ services; production behavior is
+     * identical to the previous direct-construction form.
+     */
+    private val deps: Deps,
 ) {
     interface Listener {
         /** Called on EDT. */
@@ -66,8 +72,56 @@ class ChatEngine(
 
     private val LOG = Logger.getInstance(ChatEngine::class.java)
 
+    /**
+     * Engine seams for tests. Everything is a `by lazy` accessor so fakes can
+     * be wired before first use, and the production defaults preserve the
+     * exact previous wiring (direct `LlmClient()`, `ApplicationManager`,
+     * `TellForgeAIChatsState`).
+     */
+    class Deps(
+        /**
+         * IntelliJ project for the production default accessors. Tests may
+         * pass null ONLY when they override [chats]/[toolSpecs]/[toolExecute]
+         * — in production the engine always supplies a real project.
+         */
+        private val project: Project? = null,
+        clientFactory: () -> LlmClient = { LlmClient() },
+        /** Marshal to the EDT; tests substitute a synchronous runner. */
+        val invokeLater: (block: () -> Unit) -> Unit =
+            { block -> ApplicationManager.getApplication().invokeLater(block) },
+        /** Chat store access: [ChatStore.get]/[ChatStore.upsert]. Faked in tests. */
+        val chatsGet: (id: String?) -> ChatSession? = { id -> TellForgeAIChatsState.getInstance(project!!).get(id) },
+        val chatsUpsert: (ChatSession) -> Unit = { chat ->
+            TellForgeAIChatsState.getInstance(project!!).upsert(chat)
+        },
+        /** Tool specs offered to the model for this turn (faked in tests). */
+        val toolSpecs: (planMode: Boolean) -> List<Map<String, Any>> =
+            { planMode -> ToolRegistry.specs(project!!, planMode) },
+        /** Tool execution (faked in tests so no real VFS/commands run). */
+        val toolExecute: (
+            name: String, argumentsJson: String, planMode: Boolean,
+            onDownloadRequested: (String) -> Boolean,
+            onCommandRequested: (String) -> Boolean,
+            onCommitRequested: (String) -> Boolean,
+        ) -> String = { name, argumentsJson, planMode, dl, cmd, commit ->
+            ToolRegistry.execute(project!!, name, argumentsJson, planMode, dl, cmd, commit)
+        },
+        clientOverride: LlmClient? = null,
+        /**
+         * Backoff for stream retries (attempt is 1-based). Defaults to the
+         * production [LlmErrors.backoffMs]; tests inject zero-wait to avoid
+         * real Thread.sleep in the retry loop.
+         */
+        val backoffMs: (attempt: Int) -> Long = { LlmErrors.backoffMs(it) },
+    ) {
+        /** Client for THIS chat only — other chats' streams are unaffected. */
+        val client: LlmClient by lazy { clientOverride ?: clientFactory() }
+    }
+
+    private val invokeLater: (block: () -> Unit) -> Unit = deps.invokeLater
+
     /** Client for THIS chat only — other chats' streams are unaffected. */
-    val client = LlmClient()
+    val client: LlmClient = deps.client
 
     @Volatile
     var running: Boolean = false
@@ -104,7 +158,7 @@ class ChatEngine(
     private val reasoningText = StringBuilder()
 
     /** Convenience: the persisted chat this engine drives. */
-    private fun chat(): ChatSession? = TellForgeAIChatsState.getInstance(project).get(chatId)
+    private fun chat(): ChatSession? = deps.chatsGet(chatId)
 
     /**
      * Starts a user turn: appends to the persisted history and begins the
@@ -121,13 +175,21 @@ class ChatEngine(
         chat.providerProfileId = provider.id
         chat.providerName = provider.name
         chat.updatedAt = System.currentTimeMillis()
-        TellForgeAIChatsState.getInstance(project).upsert(chat)
+        deps.chatsUpsert(chat)
+        // Prime the compaction trigger with an estimate of the actual prompt
+        // (history + summary): a freshly created engine (IDE restart, new
+        // session) starts with lastPromptTokens == 0 and would never compact
+        // a bloated chat. Lifetime usage is NOT used — a chat with a small
+        // history but huge cumulative token count must not compact every
+        // send. boundary() self-limits: it returns null once the history
+        // already fits below the compaction target.
+        lastPromptTokens = chat.messages.fold(0) { acc, m -> acc + m.estimatedTokens() } +
+            chat.contextSummary.length / 4
         running = true
         stopped = false
         completedPlanMode = null
         lastTurnFailed = false
         toolRounds = 0
-        lastPromptTokens = 0
         contextTrimNotified = false
         compactionInProgress = false
         compactionFailedForCurrentTurn = false
@@ -282,9 +344,9 @@ class ChatEngine(
         attempt: Int = 1,
     ) {
         var sawDelta = false
-        client.stream(provider, turnPlanMode, messages, ToolRegistry.specs(project, turnPlanMode)) { event ->
+        client.stream(provider, turnPlanMode, messages, deps.toolSpecs(turnPlanMode)) { event ->
             // invoked on a background thread; marshal to the EDT
-            ApplicationManager.getApplication().invokeLater {
+            invokeLater {
                 // After Stop only finalize: the cancellation surfaces as a Done
                 // (or Error) event which must still end the turn, else the
                 // overview would show "running" forever.
@@ -311,14 +373,24 @@ class ChatEngine(
                             attempt <= MAX_RETRIES && !sawDelta
                         when {
                             canRetry -> {
-                                val wait = LlmErrors.backoffMs(attempt)
+                                val wait = deps.backoffMs(attempt)
                                 listener.onSystem(
                                     "⏳ ${kindLabel(kind)} (attempt $attempt failed) — retrying in ${wait / 1000}s…",
                                 )
                                 LOG.info("TellForgeAI: retrying stream after ${kindLabel(kind)}; attempt $attempt, wait ${wait}ms")
-                                Thread {
+                                if (wait == 0L) {
+                                    // Nothing to wait for — no thread hop; runs
+                                    // through the same marshal as a delay would.
+                                    invokeLater {
+                                        if (running && !stopped) {
+                                            streamWithRetry(provider, messages, budget, toolRound, attempt + 1)
+                                        } else {
+                                            endTurn()
+                                        }
+                                    }
+                                } else Thread {
                                     Thread.sleep(wait)
-                                    ApplicationManager.getApplication().invokeLater {
+                                    invokeLater {
                                         if (running && !stopped) {
                                             streamWithRetry(provider, messages, budget, toolRound, attempt + 1)
                                         } else {
@@ -405,13 +477,27 @@ class ChatEngine(
         passesLeft: Int = 1,
     ) {
         val window = contextWindow(provider)
-        val summarizeBudget = window?.let { it - ContextGuard.RESERVE_TOKENS - (it * 0.12).toInt() }
-            ?: DEFAULT_SUMMARIZE_BUDGET
+        val summarizeBudget = summarizeBudgetSafe(window)
         val maxTokens = window?.let { (it * 0.12).toInt() }?.coerceAtLeast(512) ?: 3_000
         val summaryInput = ConversationCompactor.summarizationMessages(oldMessages, contextSummary)
         val fitted = HistoryTrimmer.fitResult(summaryInput, summarizeBudget)
-        client.summarize(provider, turnPlanMode, fitted.messages, maxTokens) { result ->
-            ApplicationManager.getApplication().invokeLater {
+        // The transcript inside the summarize input is BOTH the first and the
+        // last user message, so HistoryTrimmer's protection rules (never drop
+        // the original task / current turn) make it untrimmable — fit returns
+        // it whole even when it alone exceeds the budget. The summarize call
+        // must fit the window, so as a final measure head-truncate the
+        // transcript content to the remaining budget (chars ≈ tokens/4).
+        val out = if (!fitted.fitsFully) {
+            var remaining = summarizeBudget - (fitted.messages.size - 1) * 8 - fitted.messages
+                .dropLast(1).sumOf { it.estimatedTokens() }
+            if (remaining < 128) remaining = 128
+            fitted.messages.dropLast(1) + fitted.messages.last()
+                .copy(content = fitted.messages.last().content.take(remaining * 4))
+        } else {
+            fitted.messages
+        }
+        client.summarize(provider, turnPlanMode, out, maxTokens) { result ->
+            invokeLater {
                 compactionInProgress = false
                 if (stopped) {
                     endTurn()
@@ -441,6 +527,10 @@ class ChatEngine(
                         }
                         compactionFailedForCurrentTurn = true
                         lastPromptTokens = 0
+                        listener.onSystem(
+                            "⚠ Conversation compaction failed (${error.message ?: error.javaClass.simpleName}) — " +
+                                "falling back to history trimming for this turn.",
+                        )
                     },
                 )
                 startTurn()
@@ -450,6 +540,10 @@ class ChatEngine(
 
     /** Budget for the summarize request when no window is known (≈ 32k tokens). */
     private val DEFAULT_SUMMARIZE_BUDGET = 32_000
+
+    private fun summarizeBudgetSafe(window: Int?): Int =
+        window?.let { it - ContextGuard.RESERVE_TOKENS - (it * 0.12).toInt() }
+            ?: DEFAULT_SUMMARIZE_BUDGET
 
     private fun contextWindow(provider: ProviderProfile): Int? {
         val chat = chat()
@@ -473,7 +567,7 @@ class ChatEngine(
                 chat.incomingTokens += usage.promptTokens.coerceAtLeast(0).toLong()
                 chat.cachedInputTokens += (usage.cachedPromptTokens ?: 0).coerceIn(0, usage.promptTokens.coerceAtLeast(0)).toLong()
                 chat.outgoingTokens += usage.completionTokens.coerceAtLeast(0).toLong()
-                TellForgeAIChatsState.getInstance(project).upsert(chat)
+                deps.chatsUpsert(chat)
                 listener.onUsageRecorded()
             }
         }
@@ -573,21 +667,20 @@ class ChatEngine(
         Thread {
             try {
                 val results = calls.map { call ->
-                    val result = ToolRegistry.execute(
-                        project, call.name, call.arguments, turnPlanMode,
-                        onDownloadRequested = { request ->
+                    val result = deps.toolExecute(
+                        call.name, call.arguments, turnPlanMode,
+                        { request ->
                             requestApproval(
                                 "TellForgeAI wants to download a binary file:\n\n$request\n\nAllow?", "Download binary",
                             )
                         },
-                        onCommandRequested = { command ->
+                        { command ->
                             if (!dev.tellforgeai.settings.TellForgeAISettings.getInstance().askBeforeRunCommands()) true
                             else requestApproval(
                                 "TellForgeAI wants to run this command:\n\n$command\n\nAllow?", "Run command",
                             )
                         },
-                        // Always-on gate for instructions-repo commits+pushes.
-                        onCommitRequested = { diff ->
+                        { diff ->
                             requestApproval(
                                 "TellForgeAI wants to commit and push this change to the instructions repo:\n\n$diff",
                                 "Push instructions change",
@@ -596,7 +689,7 @@ class ChatEngine(
                     )
                     call to result
                 }
-                ApplicationManager.getApplication().invokeLater {
+                invokeLater {
                     for ((call, result) in results) {
                         listener.onToolResult(call, result)
                         addToMessages { it += ChatMessage.toolResult(call.id, result.take(MAX_TOOL_RESULT_CHARS)) }
@@ -609,14 +702,14 @@ class ChatEngine(
                         // was delivered; defer until the client is actually idle so
                         // stream()'s isRunning() guard doesn't drop this turn.
                         client.whenIdle {
-                            ApplicationManager.getApplication().invokeLater {
+                            invokeLater {
                                 if (running && !stopped) startTurn()
                             }
                         }
                     }
                 }
             } catch (e: Exception) {
-                ApplicationManager.getApplication().invokeLater {
+                invokeLater {
                     lastTurnFailed = true
                     listener.onSystem("Tool execution failed: ${e.message ?: e.javaClass.simpleName}")
                     endTurn()
@@ -687,7 +780,7 @@ class ChatEngine(
         chat.compactedMessageCount = compactedMessageCount.coerceIn(0, chat.messages.size)
         chat.updatedAt = System.currentTimeMillis()
         chat.title = chat.autoTitle()
-        TellForgeAIChatsState.getInstance(project).upsert(chat)
+        deps.chatsUpsert(chat)
     }
 
     /** Provider name captured at send time (falls back to the persisted one). */
