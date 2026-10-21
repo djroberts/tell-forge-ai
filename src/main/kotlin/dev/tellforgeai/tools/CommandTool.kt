@@ -14,6 +14,19 @@ object CommandTool {
     internal val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(CommandTool::class.java)
 
     const val DEFAULT_TIMEOUT_SECONDS = 30L
+
+    /** Hard ceiling for any command timeout (per-call or configured): 5 minutes. */
+    const val MIN_TIMEOUT_SECONDS = 1L
+    const val MAX_TIMEOUT_SECONDS = 300L
+
+    /**
+     * Optional per-call `timeout` (seconds) from the tool arguments, clamped to
+     * [MIN_TIMEOUT_SECONDS]..[MAX_TIMEOUT_SECONDS]. Null when absent or non-numeric
+     * — the caller then falls back to the global setting.
+     */
+    internal fun requestedTimeoutSeconds(args: JsonObject): Long? =
+        VfsTools.intArg(args, "timeout")
+            ?.let { it.toLong().coerceIn(MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS) }
     const val MAX_OUTPUT_CHARS = 8_000
 
     val IS_WINDOWS: Boolean =
@@ -179,7 +192,9 @@ object CommandTool {
             return redirectBlock(command, op)
         }
         if (!onCommandRequested(command)) return "Command declined by user."
-        val timeoutSeconds = TellForgeAISettings.getInstance().commandTimeoutSeconds().toLong()
+        val timeoutSeconds = requestedTimeoutSeconds(args)
+            ?: TellForgeAISettings.getInstance().commandTimeoutSeconds().toLong()
+                .coerceIn(MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS)
         return try {
             val builder = if (IS_WINDOWS) {
                 // cmd.exe /c covers .bat/.cmd and builtins (dir, type, where…).

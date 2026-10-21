@@ -1,5 +1,7 @@
 package dev.tellforgeai.tools
 
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -99,5 +101,19 @@ class CommandToolTest {
 
     private fun nullableAndAssert(rejection: String?) {
         assertNull(rejection)
+    }
+
+    @Test
+    fun `timeout arg is clamped into 1-300`() {
+        assertEquals(300L, CommandTool.requestedTimeoutSeconds(buildJsonObject { put("timeout", 900) }))
+        assertEquals(120L, CommandTool.requestedTimeoutSeconds(buildJsonObject { put("timeout", 120) }))
+        assertEquals(1L, CommandTool.requestedTimeoutSeconds(buildJsonObject { put("timeout", 0) }))
+        assertEquals(1L, CommandTool.requestedTimeoutSeconds(buildJsonObject { put("timeout", -5) }))
+    }
+
+    @Test
+    fun `missing or non-numeric timeout yields null`() {
+        assertNull(CommandTool.requestedTimeoutSeconds(buildJsonObject { }))
+        assertNull(CommandTool.requestedTimeoutSeconds(buildJsonObject { put("timeout", "abc") }))
     }
 }

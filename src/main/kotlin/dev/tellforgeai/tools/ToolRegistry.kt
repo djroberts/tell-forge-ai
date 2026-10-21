@@ -89,6 +89,8 @@ object ToolRegistry {
                 "output redirection only discards information.\n" +
                 "Run a single simple command instead; if you need grep-like output " +
                 "filtering, use search_files or read_file rather than 'grep ... | head'.\n" +
+                "Long-running commands (builds, installs) may pass a per-call timeout in " +
+                "seconds (max 300, 5 minutes); the default is the global setting.\n" +
                 "Do NOT claim a mutation is impossible without first TRYING it: if the user " +
                 "is confident a command should work, run it once and report the real error " +
                 "instead of asserting tool restrictions from memory.\n" +
@@ -96,7 +98,10 @@ object ToolRegistry {
             jsonObjectProps("command" to "The shell command to execute. A single plain command — " +
                 "no redirects (including 2>&1) or chaining; pipes into pure readers " +
                 "(head/tail/wc/sort/uniq/cut) are permitted in read-only mode. stdout and " +
-                "stderr are both returned automatically."),
+                "stderr are both returned automatically.",
+                "timeout" to ("Optional per-command timeout in seconds for long-running " +
+                    "commands (builds, installs). Default is the global setting; hard cap 300 " +
+                    "(5 minutes), higher values are clamped down.")),
             required = listOf("command"),
         ),
         spec(

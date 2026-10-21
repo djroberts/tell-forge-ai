@@ -4,6 +4,12 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.4] - 2026-10-21
+
+### Added
+- Optional per-call `timeout` (seconds, max 5 minutes) for run_command, so long
+  builds can wait past the 30 s default (tools)
+
 ## [0.17.3] - 2026-11-02
 
 ### Fixed
