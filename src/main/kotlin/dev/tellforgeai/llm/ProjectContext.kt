@@ -5,6 +5,7 @@ import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import dev.tellforgeai.tools.IgnoreRules
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 /**
  * Builds a compact always-on context block describing the current project,
@@ -30,13 +31,37 @@ object ProjectContext {
     }
 
     private fun gitBranch(basePath: String): String = try {
-        val p = ProcessBuilder("git", "branch", "--show-current")
+        val p = ProcessBuilder(resolveGit(), "branch", "--show-current")
             .directory(File(basePath))
             .redirectErrorStream(true)
             .start()
-        p.inputStream.bufferedReader().readText().trim().also { p.waitFor() }
+        p.inputStream.bufferedReader().readText().trim().also { p.waitFor(5, TimeUnit.SECONDS) }
     } catch (_: Exception) {
         ""
+    }
+
+    /**
+     * Best-effort git path for a one-shot, non-critical call: absolute
+     * well-known locations first (a GUI-launched IDE often lacks the shell
+     * PATH), then bare "git". Never throws.
+     */
+    private fun resolveGit(): String {
+        val candidates = listOf(
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/usr/bin/git",
+            "C:\\Program Files\\Git\\cmd\\git.exe",
+            "git",
+        )
+        return candidates.firstOrNull { c ->
+            try {
+                val p = ProcessBuilder(c, "--version").redirectErrorStream(true).start()
+                p.inputStream.bufferedReader().readText()
+                p.waitFor(3, TimeUnit.SECONDS) && p.exitValue() == 0
+            } catch (_: Exception) {
+                false
+            }
+        } ?: "git"
     }
 
     private fun tree(basePath: String): String {

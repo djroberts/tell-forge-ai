@@ -7,11 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.17.3] - 2026-11-02
 
 ### Fixed
+- Instructions Sync no longer fails with "Cannot run program "git" … error=2": clone
+  directories are now created under the IDE's real system directory (not a
+  relative path that could resolve against the wrong working directory and never
+  materialize), the directory is verified before git is launched, and a working
+  git executable is located even when the IDE was launched from the desktop
+  without a shell PATH (uses the IDE-configured git, then well-known install
+  locations) (instructions sync)
 - The context usage meter now reflects the provider-reported prompt size instead of showing an underestimate while the engine warned that the context was nearly full (ui/chat)
 - The usage meter and the near-full warning now resolve the context window through the same logic, so they can no longer disagree about which model's window applies (ui)
 
 ## [0.17.2] - 2026-11-02
-
 ### Fixed
 - Context compaction now triggers even on a freshly opened chat (after IDE start or chat re-open); previously a bloated chat could wait forever without ever compacting (chat)
 - The compaction summarize request is now always bounded to the context window: if the transcript alone exceeds the budget, its oldest content is head-truncated instead of sending an oversized request (chat)

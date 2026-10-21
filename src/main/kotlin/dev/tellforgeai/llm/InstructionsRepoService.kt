@@ -1,5 +1,6 @@
 package dev.tellforgeai.llm
 
+import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
@@ -7,6 +8,7 @@ import com.intellij.openapi.util.io.FileUtil
 import dev.tellforgeai.settings.InstructionsRepoState
 import dev.tellforgeai.settings.RepoSpec
 import java.io.File
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.concurrent.CompletableFuture
@@ -231,7 +233,15 @@ class InstructionsRepoService(private val project: Project) {
         if (!isRealClone(dir)) {
             LOG.info("instructions repo: cloning ${spec.cloneUrl} (branch $branchName) into $dir")
             FileUtil.delete(dir)
-            dir.parentFile.mkdirs()
+            val parent = dir.parentFile
+            // Never launch git into a non-existent directory: ProcessBuilder
+            // fails with a misleading "error=2 … No such file or directory"
+            // that looks like "git is missing" but is really the missing cwd.
+            if (!parent.isDirectory && !parent.mkdirs()) {
+                throw IllegalStateException(
+                    "Cannot create instructions clone directory: ${parent.absolutePath} " +
+                        "(not writable? check the IDE's system directory)")
+            }
             onStage("cloning (no local copy yet)")
             try {
                 gitTimed(dir.parentFile, 120_000L, "clone", "--depth", "1", "-b", branchName, "--single-branch", spec.cloneUrl, dir.name)
@@ -313,7 +323,7 @@ class InstructionsRepoService(private val project: Project) {
      * return false so the original exception surfaces instead.
      */
     private fun remoteHasRefs(cloneUrl: String): Boolean = try {
-        val pb = ProcessBuilder(listOf("git", "ls-remote", cloneUrl))
+        val pb = ProcessBuilder(listOf(gitExecutable(), "ls-remote", cloneUrl))
             .redirectErrorStream(true)
         applyNoPromptEnv(pb)
         val p = pb.start()
@@ -678,7 +688,7 @@ class InstructionsRepoService(private val project: Project) {
             .digest("${spec.cloneUrl}|${branchName}".toByteArray())
             .joinToString("") { "%02x".format(it) }
             .take(16)
-        val base = File(File(System.getProperty("idea.system.path", "build/idea-system")), "tellforgeai-instructions")
+        val base = File(PathManager.getSystemPath(), "tellforgeai-instructions")
         return File(base, digest)
     }
 
@@ -710,7 +720,8 @@ class InstructionsRepoService(private val project: Project) {
     private fun isRealClone(dir: File): Boolean {
         if (!File(dir, ".git").isDirectory) return false
         return try {
-            git(dir, "--no-pager", "status", "--porcelain") != null
+            git(dir, "--no-pager", "status", "--porcelain")
+            true
         } catch (_: Exception) {
             false
         }
@@ -753,13 +764,24 @@ class InstructionsRepoService(private val project: Project) {
      * process that stalls for another reason (dead network etc.).
      */
     private fun gitTimed(dir: File, timeoutMs: Long, vararg args: String): String {
-        val cmd = (listOf("git") + args.toList())
+        val cmd = (listOf(gitExecutable()) + args.toList())
         val cmdLine = cmd.joinToString(" ")
         val startedAt = System.currentTimeMillis()
         InstructionsSyncLog.info("git exec (${dir.invariantSeparatorsPath}): $cmdLine")
         val pb = ProcessBuilder(cmd).directory(dir).redirectErrorStream(false)
         applyNoPromptEnv(pb)
-        val p = pb.start()
+        val p = try {
+            pb.start()
+        } catch (e: IOException) {
+            // errno 2 from exec(3) has two distinct causes; report both so the
+            // dialog never shows a bare, misleading "git is missing".
+            if (e.message?.contains("error=2") == true) {
+                val where = if (dir.isDirectory) "" else " — working directory ${dir.path} does not exist"
+                throw IllegalStateException("Could not start git$where. Either the 'git' executable " +
+                    "is not on the IDE process's PATH, or ${dir.absolutePath} could not be created.", e)
+            }
+            throw e
+        }
         // Read both pipes concurrently — reading stdout to EOF before stderr
         // can deadlock when a pipe buffer fills with chatty stderr.
         val outF = CompletableFuture.supplyAsync { p.inputStream.bufferedReader().use { it.readText() } }
@@ -793,6 +815,76 @@ class InstructionsRepoService(private val project: Project) {
         pb.environment()["GIT_SSH_COMMAND"] = "ssh -oBatchMode=yes"
         pb.environment()["GCM_INTERACTIVE"] = "Never"
         pb.environment()["SSH_ASKPASS"] = "echo"
+    }
+
+    // ------------------------------------------------------------------
+    // git executable resolution
+    // ------------------------------------------------------------------
+
+    /** Cached resolved git path; @Volatile — recomputed on failure. */
+    @Volatile private var resolvedGit: String? = null
+
+    /**
+     * Absolute path to a working git executable, resolved once and cached.
+     * Order: the IDE's configured git (Settings → Version Control → Git,
+     * when the Git4Idea plugin is present), the PATH via ProcessBuilder's
+     * own resolution, then common install roots the IDE's GUI-launch PATH
+     * often misses (Homebrew, /usr/local, /usr, Xcode's, Windows Git). The
+     * last resort is still bare "git" — its failure surfaces the explicit
+     * dual-cause message from [gitTimed] instead of a bare error=2.
+     * Called only from background threads.
+     */
+    private fun gitExecutable(): String {
+        resolvedGit?.let { return it }
+
+        // 1) The IDE's own configured git — the exact binary JetBrains uses.
+        // Reflection on purpose: webstorm/phpstorm ship Git4Idea, but this
+        // must degrade silently when it isn't there or the API shifts.
+        try {
+            val cls = Class.forName("git4idea.config.GitExecutableManager")
+            val mgr = cls.getMethod("getInstance").invoke(null)
+            val get = cls.methods.firstOrNull { it.name == "getExecutable" && it.parameterCount == 1 }
+            if (get != null) {
+                val exe = get.invoke(mgr, project)  // GitExecutable; toString() is the path
+                val path = exe?.toString()
+                if (!path.isNullOrBlank() && gitWorks(path)) {
+                    LOG.info("instructions repo: using IDE-configured git: $path")
+                    resolvedGit = path
+                    return path
+                }
+            }
+        } catch (_: Throwable) {
+            // git4idea not installed, or API changed — fall through to PATH/known roots.
+        }
+
+        // 2 & 3) Try bare "git", then well-known absolute locations the
+        // IDE's GUI-launched PATH often misses (Homebrew etc.).
+        val candidates = mutableListOf("git")
+        candidates += listOf(
+            "/opt/homebrew/bin/git",                 // Apple Silicon Homebrew
+            "/usr/local/bin/git",                    // Intel mac / Linux Homebrew
+            "/usr/bin/git",                          // most Linux distros, Xcode CLT
+            "C:\\Program Files\\Git\\cmd\\git.exe",  // Git for Windows
+        )
+        for (c in candidates) {
+            if (gitWorks(c)) {
+                LOG.info("instructions repo: using git at: $c")
+                resolvedGit = c
+                return c
+            }
+        }
+        return "git" // let gitTimed produce its explicit launch-failure error
+    }
+
+    /** Common candidate roots are only worth probing on non-Windows/mac/Linux alike; cheap so no gating needed. */
+    /** Cheap health probe: `--version` must exit 0 within 5 seconds. */
+    private fun gitWorks(path: String): Boolean = try {
+        val pb = ProcessBuilder(listOf(path, "--version")).redirectErrorStream(true)
+        val p = pb.start()
+        p.inputStream.bufferedReader().use { it.readText() } // EOF implies exit; also drains the pipe
+        p.waitFor(5, TimeUnit.SECONDS) && p.exitValue() == 0
+    } catch (_: Exception) {
+        false
     }
 
     /**
