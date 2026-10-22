@@ -27,6 +27,7 @@ class ChatEngineLifecycleTest {
         private val summarizeResults: MutableList<Result<String>> = mutableListOf(),
         private val streamEvents: MutableList<LlmClient.Event> = mutableListOf(),
     ) : LlmClient() {
+
         val summarizeRequests = mutableListOf<List<ChatMessage>>()
         var summarizeCall = 0
         var streamCall = 0
@@ -429,5 +430,94 @@ class ChatEngineLifecycleTest {
 
         assertEquals("complete", chat.lastTurnStatus)
         assertTrue(listener.systems.isEmpty())
+    }
+
+    // --- busy-connector deferral (silent-drop regression) ---
+
+    /**
+     * Client that emulates the async tear-down window: a first stream is
+     * still "active" when the next stream() call arrives. The connector must
+     * defer via whenIdle instead of silently dropping (the old
+     * `if (isRunning()) return`), otherwise the turn never fires an event and
+     * the engine stays stranded in running=true — every later Send swallowed.
+     */
+    private class BusyUntilReleasedClient(private val events: List<LlmClient.Event>) : LlmClient() {
+        var busy = false
+        val streamCalls = mutableListOf<Int>()
+        private val queued = mutableListOf<() -> Unit>()
+
+        override fun isRunning(): Boolean = busy
+
+        override fun whenIdle(action: () -> Unit) {
+            if (busy) queued.add(action) else action()
+        }
+
+        /** Emulates the connector job's async tear-down completing. */
+        fun release() {
+            busy = false
+            val pending = queued.toList()
+            queued.clear()
+            pending.forEach { it() }
+        }
+
+        override fun stream(
+            profile: ProviderProfile,
+            planMode: Boolean,
+            history: List<ChatMessage>,
+            tools: List<Map<String, Any>>,
+            onEvent: (LlmClient.Event) -> Unit,
+        ) {
+            if (isRunning()) {
+                // exact same deferral contract the connectors now implement
+                whenIdle { stream(profile, planMode, history, tools, onEvent) }
+                return
+            }
+            streamCalls.add(1)
+            busy = true
+            events.forEach { onEvent(it) }
+            busy = false
+        }
+    }
+
+    @Test
+    fun `stream deferred while client busy still runs and ends the turn`() {
+        val chats = FakeChats()
+        val listener = RecordingListener()
+        val client = BusyUntilReleasedClient(
+            listOf(LlmClient.Event.Done("fine", finishReason = "stop")),
+        )
+        chats.chats.add(ChatSession.new("t"))
+        val chat = chats.chats.first()
+        // A stream is mid-tear-down (the window a Stop leaves the connector in).
+        client.busy = true
+        val engine = ChatEngine(
+            project = null,
+            chatId = chat.id,
+            listener = listener,
+            requestApproval = { _, _ -> true },
+            projectContext = { "" },
+            instructionsLayer = { "" },
+            deps = ChatEngine.Deps(
+                project = null,
+                clientOverride = client,
+                invokeLater = syncEdt(),
+                chatsGet = chats::get,
+                chatsUpsert = chats::upsert,
+                toolSpecs = { emptyList() },
+                toolExecute = { _, _, _, _, _, _, _ -> "unused" },
+                backoffMs = { 0 },
+            ),
+        )
+
+        engine.send("task", planMode = false, provider = profile())
+
+        assertTrue("turn is pending while the client is busy", engine.running)
+        assertEquals("no stream may run while busy", 0, client.streamCalls.size)
+
+        client.release()
+
+        assertEquals("deferred turn must run exactly once", 1, client.streamCalls.size)
+        assertFalse("turn must not be stranded in running=true", engine.running)
+        assertEquals("deferred turn must complete", "complete", chat.lastTurnStatus)
     }
 }

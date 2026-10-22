@@ -4,6 +4,16 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.5] - 2026-11-02
+
+### Fixed
+- A message sent while a previous chat turn was finishing (e.g. right after
+  Stop) is no longer silently swallowed: the stream is deferred instead of
+  being dropped, so the engine can no longer get stuck showing a turn as
+  running forever with every later Send ignored (chat)
+- Sending into a still-running turn now shows a notice instead of doing
+  nothing (ui)
+
 ## [0.18.4] - 2026-11-02
 
 ### Fixed

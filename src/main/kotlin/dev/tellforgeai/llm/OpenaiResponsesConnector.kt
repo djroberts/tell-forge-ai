@@ -64,6 +64,24 @@ class OpenaiResponsesConnector : LlmConnector {
         protocol: ApiProtocol,
         onEvent: (LlmClient.Event) -> Unit,
     ) {
+        // Same no-silent-drop policy as ChatCompletionsConnector: defer instead
+        // of dropping when a previous stream is still tearing down, otherwise a
+        // turn can vanish with no event and strand the engine in running=true.
+        if (isRunning()) {
+            whenIdle { doStream(profile, planMode, history, tools, protocol, onEvent) }
+            return
+        }
+        doStream(profile, planMode, history, tools, protocol, onEvent)
+    }
+
+    private fun doStream(
+        profile: ProviderProfile,
+        planMode: Boolean,
+        history: List<ChatMessage>,
+        tools: List<Map<String, Any>>,
+        protocol: ApiProtocol,
+        onEvent: (LlmClient.Event) -> Unit,
+    ) {
         if (isRunning()) return
         val model = profile.modelFor(planMode)
         val apiKey = ApiKeyStore.resolve(profile)

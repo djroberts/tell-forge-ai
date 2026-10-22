@@ -1467,7 +1467,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         // @path tokens in the message body load full-resolution images from disk.
         val (text, referencedImages, referencedPaths) = extractImageReferences(rawText)
         if (text.isEmpty() && images.isEmpty() && referencedImages.isEmpty()) return
-        if (currentChatId != null && runs.isRunning(currentChatId)) return
+        if (currentChatId != null && runs.isRunning(currentChatId)) {
+            appendSystem("⏳ The previous turn is still running — press Stop first (your message was kept).")
+            return
+        }
         pendingImages.clear()
         pendingImageHashes.clear()
         refreshImageStrip()

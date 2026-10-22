@@ -170,6 +170,26 @@ class ChatCompletionsConnector : LlmConnector {
         protocol: ApiProtocol,
         onEvent: (LlmClient.Event) -> Unit,
     ) {
+        // Never silently drop a turn when a previous stream is still tearing
+        // down (e.g. right after Stop: job cancellation is asynchronous and
+        // isActive stays true briefly). Dropping used to strand the engine in
+        // running=true forever — no event, no endTurn, every later Send
+        // silently swallowed. Defer like the tool follow-up turn does.
+        if (isRunning()) {
+            whenIdle { doStream(profile, planMode, history, tools, protocol, onEvent) }
+            return
+        }
+        doStream(profile, planMode, history, tools, protocol, onEvent)
+    }
+
+    private fun doStream(
+        profile: ProviderProfile,
+        planMode: Boolean,
+        history: List<ChatMessage>,
+        tools: List<Map<String, Any>>,
+        protocol: ApiProtocol,
+        onEvent: (LlmClient.Event) -> Unit,
+    ) {
         if (isRunning()) return
         val model = profile.modelFor(planMode)
         val apiKey = ApiKeyStore.resolve(profile)

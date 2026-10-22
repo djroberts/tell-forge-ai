@@ -51,7 +51,8 @@ open class LlmClient {
         else -> chatCompletions
     }
 
-    fun isRunning(): Boolean =
+    // `open` for test seams: fakes emulate the busy/tear-down window.
+    open fun isRunning(): Boolean =
         chatCompletions.isRunning() || responses.isRunning()
 
     /**
@@ -59,7 +60,7 @@ open class LlmClient {
      * connector is busy (its stream deferreds follow-up turns after tool
      * results) or runs [action] immediately when idle.
      */
-    fun whenIdle(action: () -> Unit) {
+    open fun whenIdle(action: () -> Unit) {
         val busy = listOf(chatCompletions, responses).firstOrNull { it.isRunning() }
         if (busy == null) action() else busy.whenIdle(action)
     }
