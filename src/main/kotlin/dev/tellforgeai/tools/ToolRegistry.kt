@@ -433,6 +433,8 @@ object ToolRegistry {
         onDownloadRequested: ((String) -> Boolean)? = null,
         onCommandRequested: (String) -> Boolean,
         onCommitRequested: (String) -> Boolean = onCommandRequested,
+        /** Chat id owning this call — lets Stop kill in-flight commands. */
+        chatId: String? = null,
     ): String = try {
         val args: JsonObject = if (argumentsJson.isBlank()) JsonObject(emptyMap())
         else Json.parseToJsonElement(argumentsJson).jsonObject
@@ -516,7 +518,7 @@ object ToolRegistry {
                     onCommitRequested = onCommitRequested,
                 )
             }
-            "run_command" -> CommandTool.run(project, args, planMode, onCommandRequested)
+            "run_command" -> CommandTool.run(project, args, planMode, onCommandRequested, chatId)
             "download_binary" -> if (planMode) notAllowedInPlan(name)
                 else DownloadBinaryTool.download(project, args, onDownloadRequested ?: { false })
             "write_file" -> if (planMode) notAllowedInPlan(name) else EditorTools.writeFile(project, args)

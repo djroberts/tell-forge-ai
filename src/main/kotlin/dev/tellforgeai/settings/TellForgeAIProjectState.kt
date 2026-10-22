@@ -21,6 +21,12 @@ class TellForgeAIProjectState(private val project: Project) : PersistentStateCom
 
     class State {
         var selectedProfileId: String? = null
+        /**
+         * Chat-store GC cap per project, in MB: when the persisted chats exceed
+         * this, the oldest are deleted on next open/save until it fits.
+         * 0 = disabled. Default 50.
+         */
+        var chatGcMaxMb: Int = DEFAULT_CHAT_GC_MAX_MB
     }
 
     private var state = State()
@@ -36,6 +42,23 @@ class TellForgeAIProjectState(private val project: Project) : PersistentStateCom
         set(value) {
             state.selectedProfileId = value
         }
+
+    /**
+     * Chat-store GC cap in MB for this project (0 = disabled). Coerced into the
+     * sane range; negative/missing values fall back to the default.
+     */
+    fun chatGcMaxMb(): Int {
+        val v = state.chatGcMaxMb
+        return when {
+            v == 0 -> 0
+            v < 0 -> DEFAULT_CHAT_GC_MAX_MB
+            else -> v.coerceAtLeast(1)
+        }
+    }
+
+    fun setChatGcMaxMb(value: Int) {
+        state.chatGcMaxMb = value.coerceAtLeast(0)
+    }
 
     /**
      * The selected profile, falling back to the first available profile when the
@@ -55,6 +78,9 @@ class TellForgeAIProjectState(private val project: Project) : PersistentStateCom
     }
 
     companion object {
+        /** Default per-project chat-store GC cap. */
+        const val DEFAULT_CHAT_GC_MAX_MB = 50
+
         @JvmStatic
         fun getInstance(project: Project): TellForgeAIProjectState =
             project.getService(TellForgeAIProjectState::class.java)

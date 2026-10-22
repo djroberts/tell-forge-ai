@@ -4,6 +4,24 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.1] - 2026-11-02
+
+### Fixed
+- Stop now ends the turn within seconds during tool execution: in-flight shell
+  commands are force-killed, pending command-approval dialogs are dismissed as
+  declined, and remaining queued tool calls are skipped instead of running to
+  their timeouts (tools, chat)
+
+## [0.18.0] - 2026-11-02
+
+### Added
+- Chat storage size visibility: each chat in the overview shows its estimated
+  persisted size (KB/MB/GB) and the "Chats" header shows the per-project total (ui, chats)
+- Per-project chat storage GC: when the persisted chats exceed the configured cap
+  (Settings → Tools → TellForgeAI Providers, default 50 MB, 0 = off), the oldest
+  chats are deleted until the store fits; chats with a running turn are never
+  evicted (settings, chats)
+
 ## [0.17.4] - 2026-10-21
 
 ### Added

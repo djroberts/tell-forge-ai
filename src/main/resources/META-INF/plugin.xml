@@ -40,7 +40,7 @@
                     icon="/META-INF/tellForgeAIToolWindow.svg"
                     factoryClass="dev.tellforgeai.ui.TellForgeAIToolWindowFactory"
                     canCloseContents="false"/>
-        <applicationConfigurable
+        <projectConfigurable
                 parentId="tools"
                 id="dev.tellforgeai.settings.TellForgeAIConfigurable"
                 displayName="TellForgeAI Providers"

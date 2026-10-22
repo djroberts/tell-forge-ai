@@ -103,8 +103,9 @@ class ChatEngine(
             onDownloadRequested: (String) -> Boolean,
             onCommandRequested: (String) -> Boolean,
             onCommitRequested: (String) -> Boolean,
-        ) -> String = { name, argumentsJson, planMode, dl, cmd, commit ->
-            ToolRegistry.execute(project!!, name, argumentsJson, planMode, dl, cmd, commit)
+            chatId: String?,
+        ) -> String = { name, argumentsJson, planMode, dl, cmd, commit, chatId ->
+            ToolRegistry.execute(project!!, name, argumentsJson, planMode, dl, cmd, commit, chatId)
         },
         clientOverride: LlmClient? = null,
         /**
@@ -163,6 +164,9 @@ class ChatEngine(
     /** Convenience: the persisted chat this engine drives. */
     private fun chat(): ChatSession? = deps.chatsGet(chatId)
 
+    /** True while this chat's engine is mid-turn (runs in the background). */
+    val isRunning: Boolean get() = running
+
     /**
      * Starts a user turn: appends to the persisted history and begins the
      * loop. [planMode] and [provider] are frozen for the whole turn.
@@ -204,6 +208,9 @@ class ChatEngine(
         if (!running) return
         stopped = true
         client.cancel()
+        // Kill in-flight command processes and release approval gates for this
+        // chat so the turn ends now instead of after their timeouts.
+        ToolProcessRegistry.abort(chatId)
     }
 
     /**
@@ -667,7 +674,7 @@ class ChatEngine(
         Thread {
             try {
                 val results = calls.map { call ->
-                    val result = deps.toolExecute(
+                    val result = if (stopped) "Skipped: turn stopped by user." else deps.toolExecute(
                         call.name, call.arguments, turnPlanMode,
                         { request ->
                             requestApproval(
@@ -686,6 +693,7 @@ class ChatEngine(
                                 "Push instructions change",
                             )
                         },
+                        chatId,
                     )
                     call to result
                 }

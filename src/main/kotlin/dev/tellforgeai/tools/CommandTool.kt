@@ -173,6 +173,8 @@ object CommandTool {
         args: JsonObject,
         planMode: Boolean,
         onCommandRequested: (String) -> Boolean,
+        /** Optional chat id — when supplied, Stop can kill the running process. */
+        chatId: String? = null,
     ): String {
         val command = VfsTools.str(args, "command")?.trim()
             ?: throw IllegalArgumentException("command required")
@@ -211,7 +213,19 @@ object CommandTool {
             val proc = builder
                 .directory(VfsTools.root(project))
                 .start()
-            val finished = proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            // Register so ChatEngine.stop() can destroyForcibly() this process;
+            // aborted via Stop, waitFor returns and the result reports "aborted".
+            val registry = chatId?.let { dev.tellforgeai.chat.ToolProcessRegistry }
+            if (registry != null) registry.register(chatId, proc)
+            val finished: Boolean = try {
+                proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            } finally {
+                if (registry != null) registry.unregister(chatId, proc)
+                if (registry != null && registry.wasAborted(chatId, proc)) {
+                    return "Error: command aborted by user (Stop)."
+                }
+                if (registry != null) registry.clearAborted(chatId, proc)
+            }
             if (!finished) {
                 proc.destroyForcibly()
                 return "Error: command timed out after ${timeoutSeconds}s (adjustable in Settings → Tools → TellForgeAI Providers)"

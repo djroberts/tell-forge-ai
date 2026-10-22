@@ -5,6 +5,8 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 import com.intellij.openapi.project.Project
+import dev.tellforgeai.chat.ChatRunRegistry
+import dev.tellforgeai.chat.ChatSizes
 import dev.tellforgeai.model.ChatSession
 
 /**
@@ -12,7 +14,7 @@ import dev.tellforgeai.model.ChatSession
  */
 @State(name = "TellForgeAIChats", storages = [Storage("tellforgeai.chats.xml")])
 @Service(Service.Level.PROJECT)
-class TellForgeAIChatsState : PersistentStateComponent<TellForgeAIChatsState.State> {
+class TellForgeAIChatsState(private val project: Project? = null) : PersistentStateComponent<TellForgeAIChatsState.State> {
 
     class State {
         var chats: MutableList<ChatSession> = mutableListOf()
@@ -30,6 +32,36 @@ class TellForgeAIChatsState : PersistentStateComponent<TellForgeAIChatsState.Sta
     private fun prune() {
         val cutoff = System.currentTimeMillis() - RETENTION_MILLIS
         state.chats.removeAll { it.updatedAt < cutoff }
+        gcByTotalSize()
+    }
+
+    /**
+     * Size-based garbage collection: when the project's persisted chats exceed
+     * the per-project cap ([TellForgeAIProjectState.chatGcMaxMb], default
+     * 50 MB, 0 = disabled), delete the OLDEST chats first until the store fits.
+     * Sizes are estimated with [ChatSizes.bytes] (sum of text-field byte
+     * lengths ≈ the serialized XML payload). Chats with a running turn are
+     * never evicted — GC would otherwise resurrect-free delete a chat whose
+     * engine is still appending to it.
+     */
+    private fun gcByTotalSize() {
+        if (project == null) return // direct/test construction: no project hull, no GC
+        val capMb = TellForgeAIProjectState.getInstance(project).chatGcMaxMb()
+        val capBytes = capMb.toLong() * 1_024 * 1_024
+        if (capBytes <= 0) return
+        val byOldest = state.chats.toMutableList()
+        byOldest.sortBy { it.updatedAt }
+        var total = ChatSizes.total(byOldest)
+        if (total <= capBytes) return
+        val running = ChatRunRegistry.runningIds(project).toSet()
+        val iter = byOldest.iterator()
+        while (total > capBytes && iter.hasNext()) {
+            val chat = iter.next()
+            if (chat.id in running) continue
+            total -= ChatSizes.bytes(chat)
+            iter.remove()
+        }
+        state.chats = byOldest
     }
 
     /** All chats, most recently updated first. */

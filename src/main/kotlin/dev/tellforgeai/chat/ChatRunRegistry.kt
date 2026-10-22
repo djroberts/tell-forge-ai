@@ -30,6 +30,23 @@ class ChatRunRegistry(private val project: Project) {
     fun runningIds(): List<String> =
         engines.entries.filter { it.value.running }.map { it.key }
 
+    companion object {
+        /**
+         * Process-wide map of project → running chat-id snapshots. Each panel
+         * owns its own registry instance (no project-level service exists), so
+         * consumers outside the panel — chat-store GC — need this aggregation
+         * to protect actively-running chats from eviction. Entries are
+         * refreshed by each registry on every state change and dropped on
+         * dispose; empties are harmless.
+         */
+        private val runningByProject = java.util.concurrent.ConcurrentHashMap<Project, Set<String>>()
+
+        /** Union of all running chat ids for [project], across panel registries. */
+        @JvmStatic
+        fun runningIds(project: Project): List<String> =
+            runningByProject[project].orEmpty().sorted()
+    }
+
     /** True when the chat's last turn ended normally (for the "complete" icon). */
     @Synchronized
     fun hasCompleted(chatId: String?): Boolean =
@@ -46,13 +63,17 @@ class ChatRunRegistry(private val project: Project) {
      * repeated panel interactions.
      */
     @Synchronized
-    fun engineFor(chatId: String, create: () -> ChatEngine): ChatEngine =
-        engines.getOrPut(chatId) { create() }
+    fun engineFor(chatId: String, create: () -> ChatEngine): ChatEngine {
+        val engine = engines.getOrPut(chatId) { create() }
+        refreshRunningSnapshot()
+        return engine
+    }
 
     /** Stops the chat's engine; buffered output is kept and persisted. */
     @Synchronized
     fun stop(chatId: String) {
         engines[chatId]?.stop()
+        refreshRunningSnapshot()
     }
 
     /** Cancels everything and drops the engines — project/tool-window dispose. */
@@ -60,5 +81,11 @@ class ChatRunRegistry(private val project: Project) {
     fun disposeAll() {
         engines.values.forEach { it.dispose(cancel = true) }
         engines.clear()
+        runningByProject.remove(project)
+    }
+
+    /** Pushes this registry's running-id set into the process-wide map. */
+    private fun refreshRunningSnapshot() {
+        runningByProject[project] = runningIds().toSet()
     }
 }

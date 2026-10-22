@@ -21,7 +21,7 @@ import javax.swing.event.PopupMenuListener
  * Settings page: Tools -> TellForgeAI Providers.
  * Manage named OpenAI-compatible profiles (name, URL, key, model).
  */
-class TellForgeAIConfigurable : Configurable {
+class TellForgeAIConfigurable(private val project: com.intellij.openapi.project.Project) : Configurable {
 
     private val nameField = JBTextField()
     private val urlField = JBTextField()
@@ -33,6 +33,11 @@ class TellForgeAIConfigurable : Configurable {
     private val timeoutField = JBTextField()
     /** Longest-side cap for pasted images: 256/512/1024/2048/Original. */
     private val pastedImageSizeCombo = JComboBox(arrayOf("256", "512", "1024", "2048", "Original"))
+    /**
+     * Per-project chat-store GC cap in MB. Blank/0 = disabled; the default
+     * placeholder shows the shipped default (50).
+     */
+    private val chatGcMaxMbField = JBTextField()
     private val aiPricingLookupCheckBox = JCheckBox("Use the selected LLM for a billable pricing lookup (cached for 24 hours)")
     /** API protocol selector (OpenAI-compatible / OpenAI Responses / Gemini preset). */
     private val protocolCombo = JComboBox(ApiProtocol.entries.map { it.displayName }.toTypedArray())
@@ -265,6 +270,13 @@ class TellForgeAIConfigurable : Configurable {
         center.add(labeled("Command timeout in seconds (5–600, applies to terminal tool; global)", timeoutField))
         center.add(aiPricingLookupCheckBox)
         center.add(labeled("Max pasted image size in px (longest side; Original = no resize; global)", pastedImageSizeCombo))
+        chatGcMaxMbField.emptyText.text = "50 (default) — 0 disables chat GC"
+        center.add(
+            labeled(
+                "Chat storage GC cap in MB for THIS project — oldest chats are deleted when the total exceeds it (0 = off)",
+                chatGcMaxMbField,
+            )
+        )
         aiPricingLookupCheckBox.addActionListener { modified = true }
         root.add(center, BorderLayout.CENTER)
         // Initial population is programmatic — must not flip [modified] or
@@ -287,6 +299,9 @@ class TellForgeAIConfigurable : Configurable {
         aiPricingLookupCheckBox.isSelected = s.aiPricingLookupEnabled()
         pastedImageSizeCombo.selectedItem =
             s.pastedImageMaxSize().takeIf { it > 0 }?.toString() ?: "Original"
+        // Per-project GC cap: "" renders as the placeholder (default shown in emptyText).
+        val projectCap = TellForgeAIProjectState.getInstance(project).chatGcMaxMb()
+        chatGcMaxMbField.text = projectCap.toString()
     }
 
     private fun setFormEnabled(enabled: Boolean) {
@@ -595,7 +610,8 @@ class TellForgeAIConfigurable : Configurable {
 
     override fun isModified(): Boolean {
         saveEditsIntoSelected()
-        return modified
+        val projectState = TellForgeAIProjectState.getInstance(project)
+        return modified || chatGcMaxMbField.text.trim() != projectState.chatGcMaxMb().toString()
     }
 
     override fun apply() {
@@ -624,6 +640,20 @@ class TellForgeAIConfigurable : Configurable {
                 else -> sel?.toIntOrNull() ?: 1024
             },
         )
+        // Per-project chat GC cap: garbage/blank keeps the current value, with
+        // the same warn-on-garbage treatment as the other numeric fields.
+        val projectState = TellForgeAIProjectState.getInstance(project)
+        val gcEntered = chatGcMaxMbField.text.trim()
+        val gcMb = gcEntered.toIntOrNull() ?: -1
+        when {
+            gcEntered.isEmpty() -> { /* keep as-is */ }
+            gcMb < 0 -> Messages.showWarningDialog(
+                list,
+                "\"$gcEntered\" is not a valid chat GC cap in MB — keeping the current ${projectState.chatGcMaxMb()} MB.",
+                "TellForgeAI — Invalid chat GC cap",
+            )
+            else -> projectState.setChatGcMaxMb(gcMb)
+        }
         val ids = listModel.elements().toList().map { it.id }.toSet()
         // Remove PasswordSafe entries for profiles deleted through this settings
         // UI *this session* — not merely absent from the list. If the profile

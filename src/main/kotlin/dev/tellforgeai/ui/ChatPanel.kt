@@ -405,6 +405,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val chatListModel = DefaultListModel<ChatSession>()
     private val chatList = JBList(chatListModel)
     private val homeInputArea = JTextArea(3, 40)
+    /** Total estimated persisted size of this project's chats (right of "Chats"). */
+    private val chatStoreTotalLabel = JLabel().apply {
+        font = font.deriveFont(font.size2D - 1f)
+        foreground = UIUtil.getLabelDisabledForeground()
+    }
 
     init {
         Disposer.register(TellForgeAIToolWindowDisposable.get(project)) {
@@ -602,7 +607,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 val completed = id != null && chat?.lastTurnStatus == "complete"
                 titleLabel.text = chat?.title ?: ""
                 titleLabel.font = titleLabel.font.deriveFont(java.awt.Font.BOLD)
-                timeLabel.text = chat?.let { relativeTime(it.updatedAt) } ?: ""
+                timeLabel.text =
+                    listOfNotNull(
+                        chat?.let { relativeTime(it.updatedAt) },
+                        chat?.let { sizeBadge(it) },
+                    ).joinToString("  ·  ")
                 // Provider badge lives in the LINE_END slot on the RIGHT edge of
                 // the row (bounded, gray, small). When no provider is set for the
                 // chat yet, it stays empty.
@@ -755,9 +764,14 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
         val homeHeader = JPanel(BorderLayout(6, 4)).apply {
             border = JBUI.Borders.empty(12, 12, 4, 12)
-            add(JLabel("Chats").apply {
-                font = font.deriveFont(font.size2D + 3f).deriveFont(java.awt.Font.BOLD)
-            }, BorderLayout.NORTH)
+            val titleRow = JPanel(BorderLayout()).apply {
+                isOpaque = false
+                add(JLabel("Chats").apply {
+                    font = font.deriveFont(font.size2D + 3f).deriveFont(java.awt.Font.BOLD)
+                }, BorderLayout.CENTER)
+                add(chatStoreTotalLabel, BorderLayout.EAST)
+            }
+            add(titleRow, BorderLayout.NORTH)
         }
         val modelInfoRow = JPanel(BorderLayout(4, 0)).apply {
             isOpaque = false
@@ -907,7 +921,20 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 .indexOfFirst { chatListModel[it].id == selectedId }
                 .takeIf { it >= 0 } ?: -1
         }
+        chatList.repaint()
+        updateChatStoreTotal()
         updateListTicker()
+    }
+
+    /** Updates the "Chats · N (X)" total badge; empty when there are no chats. */
+    private fun updateChatStoreTotal() {
+        val chats = (0 until chatListModel.size()).map { chatListModel[it] }
+        chatStoreTotalLabel.text =
+            if (chats.isEmpty()) ""
+            else "${chats.size} chat${if (chats.size == 1) "" else "s"} · " +
+                dev.tellforgeai.chat.ChatSizes.format(dev.tellforgeai.chat.ChatSizes.total(chats))
+        chatStoreTotalLabel.toolTipText =
+            "Estimated size of TellForgeAI's persisted chat history for this project (tellforgeai.chats.xml)"
     }
 
     /**
@@ -919,6 +946,12 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         if (needed && !listTicker.isRunning) listTicker.start()
         else if (!needed && listTicker.isRunning) listTicker.stop()
     }
+
+    /** Per-chat persisted-size estimate, e.g. "412 KB"; hidden below 1 KB. */
+    private fun sizeBadge(chat: ChatSession): String =
+        dev.tellforgeai.chat.ChatSizes.bytes(chat).let {
+            if (it < 1_024) "" else dev.tellforgeai.chat.ChatSizes.format(it.toLong())
+        }
 
     private fun deleteSelectedChat() {
         val chat = chatList.selectedValue ?: return
@@ -1671,6 +1704,10 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun requestApproval(message: String, title: String): Boolean {
         val approved = java.util.concurrent.atomic.AtomicBoolean(false)
         val latch = java.util.concurrent.CountDownLatch(1)
+        // Registering with the chat's registry lets Stop count the latch down
+        // (declining) instead of leaving an unanswered modal blocking 120 s.
+        val chatId = currentChatId
+        if (chatId != null) dev.tellforgeai.chat.ToolProcessRegistry.registerApprovalWait(chatId, latch)
         ApplicationManager.getApplication().invokeLater {
             try {
                 approved.set(
@@ -1683,9 +1720,11 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 )
             } finally {
                 latch.countDown()
+                if (chatId != null) dev.tellforgeai.chat.ToolProcessRegistry.clearApprovalWait(chatId, latch)
             }
         }
-        return latch.await(120, java.util.concurrent.TimeUnit.SECONDS) && approved.get()
+        val released = latch.await(120, java.util.concurrent.TimeUnit.SECONDS)
+        return released && approved.get()
     }
 
     private fun setStreaming(s: Boolean) {

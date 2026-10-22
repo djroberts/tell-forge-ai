@@ -140,7 +140,7 @@ class ChatEngineLifecycleTest {
                 chatsGet = chats::get,
                 chatsUpsert = chats::upsert,
                 toolSpecs = { emptyList() },
-                toolExecute = { _, _, _, _, _, _ -> "unused" },
+                toolExecute = { _, _, _, _, _, _, _ -> "unused" },
                 backoffMs = { 0 },
             ),
         )
@@ -163,7 +163,7 @@ class ChatEngineLifecycleTest {
                 chatsGet = chats::get,
                 chatsUpsert = chats::upsert,
                 toolSpecs = { emptyList() },
-                toolExecute = { _, _, _, _, _, _ -> "unused" },
+                toolExecute = { _, _, _, _, _, _, _ -> "unused" },
                 backoffMs = { 0 },
             ),
         )
