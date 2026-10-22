@@ -40,6 +40,24 @@ class ChatSizesTest {
     }
 
     @Test
+    fun `chat size memo follows updatedAt`() {
+        val chat = ChatSession.new("memo")
+        chat.messages.add(ChatMessage.user("payload " + "z".repeat(2_000)))
+        val first = ChatSizes.bytes(chat)
+        // Same updatedAt → memo hit; values equal.
+        assertEquals(first, ChatSizes.bytes(chat))
+        // Content changed with a bumped updatedAt → recompute.
+        chat.messages.add(ChatMessage.user("more " + "z".repeat(2_000)))
+        chat.updatedAt += 1
+        val second = ChatSizes.bytes(chat)
+        assertTrue("size must grow after mutation", second > first)
+        assertTrue(second - first >= 2_000)
+        // Memo validity across ticks: bump updatedAt without content change → same value.
+        chat.updatedAt += 5
+        assertEquals(second, ChatSizes.bytes(chat))
+    }
+
+    @Test
     fun `format uses KB MB GB`() {
         assertEquals("500 B", ChatSizes.format(500))
         assertTrue(ChatSizes.format(5 * 1_024L).startsWith("5.0 KB"))

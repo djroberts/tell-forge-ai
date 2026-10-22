@@ -177,7 +177,21 @@ class OpenaiResponsesConnector : LlmConnector {
                                 }
                                 "response.completed", "response.incomplete", "response.failed" -> {
                                     val resp = obj["response"] as? JsonObject
-                                    finishReason = resp?.get("status")?.jsonPrimitive?.contentOrNull ?: finishReason
+                                    // Normalize to the chat-completions finish_reason
+                                    // vocabulary: an incomplete response cut off at
+                                    // max_output_tokens surfaces as "length" so the
+                                    // engine's truncation notice covers both protocols.
+                                    finishReason = when (val status =
+                                        resp?.get("status")?.jsonPrimitive?.contentOrNull) {
+                                        "incomplete" -> when (
+                                            (resp?.get("incomplete_details") as? JsonObject)
+                                                ?.get("reason")?.jsonPrimitive?.contentOrNull
+                                        ) {
+                                            "max_output_tokens" -> "length"
+                                            else -> "incomplete"
+                                        }
+                                        else -> status ?: finishReason
+                                    }
                                     (resp?.get("usage") as? JsonObject)?.let { u ->
                                         val inputDetails = u["input_tokens_details"] as? JsonObject
                                             ?: u["prompt_tokens_details"] as? JsonObject

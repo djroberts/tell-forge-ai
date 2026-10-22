@@ -25,10 +25,19 @@ object ChatSizes {
             m.images.sumOf { bytes(it) } +
             m.referencedPaths.sumOf { bytes(it) } + 32
 
-    /** Approximate persisted size, in bytes, of a chat session. */
-    fun bytes(chat: ChatSession): Int =
-        chat.messages.sumOf { bytes(it) } + bytes(chat.contextSummary) +
-            bytes(chat.title) + bytes(chat.providerName) + 128
+    /**
+     * Approximate persisted size, in bytes, of a chat session.
+     * Memoized on [ChatSession.updatedAt] (bumped by every content mutation);
+     * the aggregate re-estimates O(all chats × messages) otherwise on every
+     * prune/GC/overview-refresh pass.
+     */
+    fun bytes(chat: ChatSession): Long {
+        chat.memoizedBytes()?.let { return it }
+        val computed = chat.messages.sumOf { bytes(it) } + bytes(chat.contextSummary) +
+            bytes(chat.title) + bytes(chat.providerName) + 128L
+        chat.putMemoizedBytes(computed)
+        return computed
+    }
 
     /** Approximate total persisted size, in bytes, of many chats. */
     fun total(chats: Collection<ChatSession>): Long = chats.sumOf { bytes(it).toLong() }

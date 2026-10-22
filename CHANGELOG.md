@@ -4,6 +4,24 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.3] - 2026-11-02
+
+### Fixed
+- A turn that ends with a blank model response (no answer text, no tool calls)
+  no longer shows a green "✓ Planning/Task complete" with nothing delivered:
+  it now fails the turn with a red marker and a "Press Send to retry" hint (chat)
+- Responses-API turns cut off at the model's output-token limit now surface a
+  "finish_reason=length" truncation notice, normalized from the Responses
+  protocol's incomplete-details reason (llm, chat)
+
+## [0.18.2] - 2026-11-02
+
+### Fixed
+- Sending, streaming and Stop no longer lag when a chat has grown large: only
+  newly arrived text is re-rendered while streaming, mid-turn persistence is
+  coalesced, Stop no longer duplicates the engine's own cleanup pass, and chat
+  size estimates are cached between content changes (ui, chat)
+
 ## [0.18.1] - 2026-11-02
 
 ### Fixed

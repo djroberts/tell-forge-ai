@@ -34,7 +34,6 @@ class TellForgeAIChatsState(private val project: Project? = null) : PersistentSt
         state.chats.removeAll { it.updatedAt < cutoff }
         gcByTotalSize()
     }
-
     /**
      * Size-based garbage collection: when the project's persisted chats exceed
      * the per-project cap ([TellForgeAIProjectState.chatGcMaxMb], default

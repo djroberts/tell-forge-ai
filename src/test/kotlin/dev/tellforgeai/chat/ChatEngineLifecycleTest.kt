@@ -305,4 +305,129 @@ class ChatEngineLifecycleTest {
         assertEquals("no retry once tokens streamed", 1, client.streamCall)
         assertEquals("error", chat.lastTurnStatus)
     }
+
+    // --- mid-turn persist coalescing ---
+
+    /**
+     * A tool round persists twice (assistant-with-tool-calls message, then its
+     * results) within COALESCE_MS. Only one of the two writes may go through;
+     * the final turn-end persist always writes through so the turn status
+     * reaches the store.
+     */
+    @Test
+    fun `mid-turn persists coalesce but the turn end writes through`() {
+        val chats = FakeChats()
+        val listener = RecordingListener()
+        val client = FakeClient(
+            streamEvents = mutableListOf(
+                LlmClient.Event.Delta("calling tool "),
+                LlmClient.Event.Done(
+                    "calling tool", toolCalls = listOf(ToolCall(id = "c1", name = "search_files", arguments = "{}")),
+                ),
+            ),
+        )
+        val engine = plainEngine(chats, client, listener)
+        val chat = chats.chats.first()
+        var upserts = 0
+        val countingUpsert: (ChatSession) -> Unit = { upserts++; chats.upsert(it) }
+        val engineWithCounter = ChatEngine(
+            project = null,
+            chatId = chat.id,
+            listener = listener,
+            requestApproval = { _, _ -> true },
+            projectContext = { "" },
+            instructionsLayer = { "" },
+            deps = ChatEngine.Deps(
+                project = null,
+                clientOverride = client,
+                invokeLater = syncEdt(),
+                chatsGet = chats::get,
+                chatsUpsert = countingUpsert,
+                toolSpecs = { emptyList() },
+                toolExecute = { _, _, _, _, _, _, _ -> "result" },
+                backoffMs = { 0 },
+            ),
+        )
+
+        engineWithCounter.send("run tool", planMode = false, provider = profile())
+
+        // Tool execution runs on a real background thread — wait for the
+        // turn to end (bounded), then assert on the final persisted state.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (engineWithCounter.running && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+        }
+        assertFalse("turn must have ended", engineWithCounter.running)
+
+        // Persist points in one tool round: turn start (send), the assistant
+        // tool-call message (coalesced write), tool results (coalesced SKIPPED,
+        // <500 ms after the previous write), the final persist, and the
+        // terminal endTurn persist — so at most 4 writes reach the store.
+        assertTrue(
+            "coalescing failed: $upserts upserts for one tool round",
+            upserts <= 4,
+        )
+        assertEquals("complete", chat.lastTurnStatus)
+        assertTrue(chats.chats.first().messages.any { it.role == "tool" })
+        assertEquals("last persist must reach the store", "complete", chats.chats.first().lastTurnStatus)
+    }
+
+    // --- blank final answer / truncation surfacing ---
+
+    @Test
+    fun `blank final answer fails the turn with a retry hint`() {
+        val chats = FakeChats()
+        val listener = RecordingListener()
+        val client = FakeClient(
+            // No deltas, blank fullText, no tool calls — the blank-answer turn.
+            streamEvents = mutableListOf(LlmClient.Event.Done("", finishReason = "stop")),
+        )
+        val engine = plainEngine(chats, client, listener)
+        val chat = chats.chats.first()
+
+        engine.send("task", planMode = true, provider = profile())
+
+        assertEquals("blank answer must not pass as complete", "error", chat.lastTurnStatus)
+        assertTrue(
+            listener.systems.any { it.contains("no final answer") && it.contains("Send to retry") },
+        )
+    }
+
+    @Test
+    fun `length finish reason surfaces a truncation notice on a normal turn`() {
+        val chats = FakeChats()
+        val listener = RecordingListener()
+        val client = FakeClient(
+            streamEvents = mutableListOf(
+                LlmClient.Event.Delta("partial answer"),
+                LlmClient.Event.Done("partial answer", finishReason = "length"),
+            ),
+        )
+        val engine = plainEngine(chats, client, listener)
+        val chat = chats.chats.first()
+
+        engine.send("task", planMode = false, provider = profile())
+
+        assertEquals("truncated but non-blank answer still completes", "complete", chat.lastTurnStatus)
+        assertTrue(listener.systems.any { it.contains("finish_reason=length") })
+    }
+
+    @Test
+    fun `normal turn with content and stop finish reason is quiet`() {
+        val chats = FakeChats()
+        val listener = RecordingListener()
+        val client = FakeClient(
+            streamEvents = mutableListOf(
+                LlmClient.Event.Delta("all good"),
+                LlmClient.Event.Done("all good", finishReason = "stop"),
+            ),
+        )
+        val engine = plainEngine(chats, client, listener)
+        val chat = chats.chats.first()
+
+        engine.send("task", planMode = false, provider = profile())
+
+        assertEquals("complete", chat.lastTurnStatus)
+        assertTrue(listener.systems.isEmpty())
+    }
 }

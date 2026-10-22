@@ -602,7 +602,31 @@ class ChatEngine(
                 addToMessages {
                     it += ChatMessage.assistant(event.fullText).copy(reasoning = pendingReasoning)
                 }
-                pendingReasoning = ""
+            }
+            pendingReasoning = ""
+            // Some models (notably reasoning models behind OpenAI-compatible
+            // aggregators) end the turn with a completely blank final answer:
+            // no content, no tool calls, no error. Treating that as a normal
+            // completion produced a green "✓ Planning/Task complete" marker
+            // with no answer at all. Fail the turn instead so the user gets an
+            // honest red marker and can press Send to retry.
+            if (streamedSomething || event.fullText.isNotBlank()) {
+                if (event.finishReason == "length") {
+                    listener.onSystem(
+                        "⚠ Output truncated at the model's max output tokens (finish_reason=length) — " +
+                            "the response was cut off mid-answer.",
+                    )
+                }
+            } else {
+                LOG.warn(
+                    "TellForgeAI: turn ended with a blank final answer " +
+                        "(finishReason=${event.finishReason ?: "none"}, model=${profile?.modelFor(turnPlanMode).orEmpty()})"
+                )
+                lastTurnFailed = true
+                listener.onSystem(
+                    "Error: the model produced no final answer this turn " +
+                        "(blank response, finishReason=${event.finishReason ?: "none"}). Press Send to retry.",
+                )
             }
             persistChat()
             endTurn()
@@ -666,7 +690,7 @@ class ChatEngine(
                 .copy(reasoning = pendingReasoning)
         }
         pendingReasoning = ""
-        persistChat()
+        persistChatCoalesced()
         val calls = event.toolCalls
         calls.forEach { listener.onToolPending(it) }
 
@@ -702,7 +726,7 @@ class ChatEngine(
                         listener.onToolResult(call, result)
                         addToMessages { it += ChatMessage.toolResult(call.id, result.take(MAX_TOOL_RESULT_CHARS)) }
                     }
-                    persistChat()
+                    persistChatCoalesced()
                     if (stopped) {
                         endTurn()
                     } else {
@@ -770,7 +794,7 @@ class ChatEngine(
         if (md.isBlank()) return
         pendingReasoning = ""
         addToMessages { it += ChatMessage.assistant(md).copy(reasoning = reasoning) }
-        persistChat()
+        persistChatCoalesced()
     }
 
     /** Reasoning captured by [finalizeAssistantBlock] that has not yet been persisted. */
@@ -791,6 +815,25 @@ class ChatEngine(
         deps.chatsUpsert(chat)
     }
 
+    /**
+     * Coalesced persistence. `persistChat()` (and the store's prune/GC pass it
+     * triggers, which re-sorts and re-sizes every project chat) runs O(chats)
+     * work per call, and a busy turn issues many of them on the EDT — tool
+     * results, usage record, stream finalize. Non-terminal persists are
+     * coalesced: the [TellForgeAIChatsState] instance is NOT responsible for
+     * scheduling; instead the engine skips the write when one happened less
+     * than [COALESCE_MS] ago AND the turn is still streaming. Terminal states
+     * (turn end, compaction, error, stop) always write through immediately.
+     */
+    private var lastCoalescedAt = 0L
+
+    private fun persistChatCoalesced() {
+        val now = System.currentTimeMillis()
+        if (!running || stopped || now - lastCoalescedAt < COALESCE_MS) return
+        lastCoalescedAt = now
+        persistChat()
+    }
+
     /** Provider name captured at send time (falls back to the persisted one). */
     fun providerName(): String =
         profile?.name ?: chat()?.providerName.orEmpty()
@@ -808,5 +851,7 @@ class ChatEngine(
         private const val MAX_TOOL_RESULT_CHARS = 8_000
         /** Max automatic retries for transient stream errors (1s/2s backoff). */
         private const val MAX_RETRIES = 2
+        /** Min interval between mid-turn persisted writes (turn ends always write). */
+        private const val COALESCE_MS = 500L
     }
 }

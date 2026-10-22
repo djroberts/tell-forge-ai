@@ -907,6 +907,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         lastAssistantMarkdown = StringBuilder()
         lastReasoning = StringBuilder()
         streamingHeader = ""
+        resetTailCache()
         findBar.close()
         refreshChatList()
         showCard(CARD_HOME)
@@ -950,7 +951,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     /** Per-chat persisted-size estimate, e.g. "412 KB"; hidden below 1 KB. */
     private fun sizeBadge(chat: ChatSession): String =
         dev.tellforgeai.chat.ChatSizes.bytes(chat).let {
-            if (it < 1_024) "" else dev.tellforgeai.chat.ChatSizes.format(it.toLong())
+            if (it < 1_024) "" else dev.tellforgeai.chat.ChatSizes.format(it)
         }
 
     private fun deleteSelectedChat() {
@@ -1007,6 +1008,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         lastAssistantMarkdown = StringBuilder()
         lastReasoning = StringBuilder()
         streamingHeader = ""
+        resetTailCache()
         for (m in chat.messages) {
             when (m.role) {
                 "user" -> finishedBlocks.add(
@@ -1144,6 +1146,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         lastAssistantMarkdown = StringBuilder()
         lastReasoning = StringBuilder()
         streamingHeader = ""
+        resetTailCache()
         turnEndedLive = false
         chatList.clearSelection()
         findBar.close()
@@ -1693,12 +1696,13 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         val id = currentChatId ?: return
         if (!runs.isRunning(id)) return
         runs.stop(id)
-        finishAssistantBlock()
+        // UI finalization is left to the engine's onTurnEnded(stopped=true)
+        // callback (finishAssistantBlock + setStreaming + transcript repaint
+        // + refreshChatList). Duplicating it here ran several O(chat size)
+        // EDT passes back-to-back, which made Stop noticeably laggy on big
+        // chats; it also double-inserted the streaming bubble into
+        // finishedBlocks before the callback's own finalize.
         setStreaming(false)
-        // No appendSystem here: the engine's onTurnEnded(stopped = true) callback
-        // is the single source of the "Stopped." notice; adding one on the panel
-        // side made the line appear twice.
-        refreshChatList()
     }
 
     private fun requestApproval(message: String, title: String): Boolean {
@@ -1777,8 +1781,76 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         lastAssistantMarkdown.append(delta)
         if (lastAssistantMarkdown.isNotEmpty()) thinkingTimer.stop()
         // Re-render ONLY the in-progress assistant message; earlier blocks stay fixed.
-        // Throttled: full HTML re-render per token is far too expensive.
+        // Throttled: full HTML re-render per token is far too expensive; the
+        // tail cache below converts ONLY newly arrived text per tick.
         throttledRepaint()
+    }
+
+    /**
+     * Incremental markdown→HTML cache for the streaming tail ([tailHtml]).
+     *
+     * `markdownToHtml` on the whole accumulated message re-parses O(n) text on
+     * every 200 ms tick (Swing then re-lays out the entire tail document) —
+     * quadratic over a long answer and very noticeable on the EDT. The
+     * streamed text is append-only, so converted HTML is cached: each tick
+     * converts only the NEW text, starting at the last '\n' flushed so a
+     * partially-arrived markdown construct (unclosed backtick pair, code
+     * fence) is always re-rendered from a line boundary.
+     */
+    private var tailCacheSourceLength = 0  // chars of lastAssistantMarkdown covered by tailCacheHtml
+    private var tailCacheHtml = ""
+    private var tailCacheInCode = false    // unfinished ``` fence carried across ticks
+
+    /** Line-tail offset ≤ [upto]: the position after the last '\n' at/before it. */
+    private fun flushBoundary(upto: Int): Int {
+        if (upto <= tailCacheSourceLength) return tailCacheSourceLength
+        val nl = lastAssistantMarkdown.lastIndexOf('\n', upto - 1)
+        return if (nl < tailCacheSourceLength) tailCacheSourceLength else nl + 1
+    }
+
+    /** Cached HTML for the tail; converts only newly arrived markdown text. */
+    private fun tailHtmlCached(): String {
+        val sb = lastAssistantMarkdown
+        if (sb.isEmpty()) { resetTailCache(); return "" }
+        // Line-complete prefix can be appended to the cache once.
+        val flushTo = flushBoundary(sb.length)
+        if (flushTo > tailCacheSourceLength) {
+            // Never flush an unclosed fence tail-first into the prefix; a
+            // partially-arrived block would render as plain text then be
+            // re-flushed later as fenced. Cap the boundary before the fence opener.
+            var safeFlushTo = flushTo
+            if (tailCacheInCode) {
+                val end = sb.indexOf("```", tailCacheSourceLength)
+                safeFlushTo = if (end >= 0 && end < flushTo) {
+                    (end + 3).coerceAtMost(flushTo)
+                } else flushBoundary(tailCacheSourceLength)  // nothing new flushable
+            } else {
+                val open = sb.indexOf("```", tailCacheSourceLength)
+                val close = if (open >= 0) sb.indexOf("```", open + 3) else -1
+                if (open >= 0 && (close < 0 || close >= flushTo + 3)) {
+                    // Opened fence without close within reach — stop the flush
+                    // at the '\n' BEFORE the opener so the partial remains
+                    // in the re-rendered partial region.
+                    val lineStart = sb.lastIndexOf('\n', open - 1).let { if (it >= tailCacheSourceLength) it + 1 else tailCacheSourceLength }
+                    safeFlushTo = lineStart
+                }
+            }
+            if (safeFlushTo > tailCacheSourceLength) {
+                val (html, stillInCode) = markdownToHtml(sb.substring(tailCacheSourceLength, safeFlushTo).trimEnd('\n'), tailCacheInCode)
+                tailCacheHtml += html
+                tailCacheInCode = stillInCode && safeFlushTo < sb.length && !sb.substring(safeFlushTo).startsWith("```")
+                tailCacheSourceLength = safeFlushTo
+            }
+        }
+        val partial = if (sb.length > tailCacheSourceLength) sb.substring(tailCacheSourceLength) else ""
+        return tailCacheHtml + markdownToHtml(partial, tailCacheInCode).first
+    }
+
+    /** Drops the tail cache (turn ended / chat switched — full re-render). */
+    private fun resetTailCache() {
+        tailCacheSourceLength = 0
+        tailCacheHtml = ""
+        tailCacheInCode = false
     }
 
     /**
@@ -1808,6 +1880,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
             streamingHeader = ""
             lastAssistantMarkdown = StringBuilder()
             lastReasoning = StringBuilder()
+            resetTailCache()
             repaintTranscript()
             return
         }
@@ -1816,6 +1889,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         streamingHeader = ""
         lastAssistantMarkdown = StringBuilder()
         lastReasoning = StringBuilder()
+        resetTailCache()
         // Always repaint immediately: throttle in appendXxxDelta must not leave a
         // stale "Thinking" bubble after the turn ends.
         repaintTranscript()
@@ -1863,7 +1937,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun tailHtml(): String = when {
         lastAssistantMarkdown.isNotEmpty() -> bubble(
             "${mode.label} · ${esc(profileLabel())}",
-            markdownToHtml(lastAssistantMarkdown.toString()),
+            tailHtmlCached(),
             assistantBubbleBg,
         )
         // Model is streaming its reasoning/thinking: compact one-line status
@@ -1911,6 +1985,9 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         tailPane.isVisible = !empty
     }
 
+    /** Cached <body> element of the transcript document; cleared on rebuild. */
+    private var cachedBodyElement: Element? = null
+
     /** Inserts one block into the actual HTML body, not the document's synthetic root. */
     private fun insertAtBodyEnd(html: String) {
         try {
@@ -1922,10 +1999,18 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 }
                 return null
             }
-            val body = findBody(doc.defaultRootElement)
-                ?: error("Transcript HTML has no body element")
+            // The element tree walk is O(document); a long tool loop inserts
+            // many blocks and re-walking per insert made each one slower than
+            // the last. Cache after the first lookup, reset by rebuildTranscript.
+            var body = cachedBodyElement
+            if (body == null || body.document != doc) {
+                body = findBody(doc.defaultRootElement)
+                    ?: error("Transcript HTML has no body element")
+                cachedBodyElement = body
+            }
             doc.insertBeforeEnd(body, html)
         } catch (e: Exception) {
+            cachedBodyElement = null
             // Keep the transcript usable if Swing's HTML parser rejects an inserted fragment.
             LOG.warn("TellForgeAI: incremental transcript insertion failed; rebuilding transcript", e)
             transcriptPane.text =
@@ -1936,6 +2021,7 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     /** Full rebuild — used once at open/new-chat/restore-history time, never per tick. */
     private fun rebuildTranscript() {
         transcriptPane.text = "<html><body style='margin:12px'>${finishedBlocks.joinToString("")}</body></html>"
+        cachedBodyElement = null
         renderedBlocks = finishedBlocks.size
         tailPane.text = "<html><body style='margin:0 12px 12px 12px'>${tailHtml()}</body></html>"
         tailPaneVisible()
@@ -2548,24 +2634,32 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     /** Minimal, streaming-friendly markdown: fenced code, bold, inline code. */
-    private fun markdownToHtml(md: String): String {
+    private fun markdownToHtml(md: String): String = markdownToHtml(md, inCode = false).first
+
+    /**
+     * Line-based markdown→HTML conversion. Returns the resulting parser state
+     * ([first] = HTML, [second] = still inside an unclosed code fence), so
+     * incremental callers ([tailHtmlCached]) can resume across calls without
+     * re-converting already-flushed text.
+     */
+    private fun markdownToHtml(md: String, inCode: Boolean): Pair<String, Boolean> {
         val sb = StringBuilder()
-        var inCode = false
+        var code = inCode
         val codeLines = mutableListOf<String>()
         for (line in md.split("\n")) {
             when {
                 line.trimStart().startsWith("```") -> {
-                    if (inCode) {
+                    if (code) {
                         // Copy affordance goes INSIDE the <pre> so it sits at the
                         // block's top-right corner.
-                        val code = codeLines.joinToString("\n")
-                        if (code.isNotBlank()) sb.append(CopyLink.html(code))
+                        val c = codeLines.joinToString("\n")
+                        if (c.isNotBlank()) sb.append(CopyLink.html(c))
                         sb.append("</pre>")
                         codeLines.clear()
                     } else sb.append("<pre>")
-                    inCode = !inCode
+                    code = !code
                 }
-                inCode -> {
+                code -> {
                     codeLines.add(line)
                     sb.append(esc(line)).append('\n')
                 }
@@ -2577,12 +2671,12 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 }
             }
         }
-        if (inCode) {
-            val code = codeLines.joinToString("\n")
-            if (code.isNotBlank()) sb.append(CopyLink.html(code))
+        if (code) {
+            val c = codeLines.joinToString("\n")
+            if (c.isNotBlank()) sb.append(CopyLink.html(c))
             sb.append("</pre>")
         }
-        return sb.toString()
+        return sb.toString() to code
     }
 
     companion object {

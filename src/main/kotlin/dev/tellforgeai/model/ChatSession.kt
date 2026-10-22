@@ -51,6 +51,28 @@ data class ChatSession(
     /** Whether that last turn ran in Foretell (plan) mode, for the marker label. */
     var lastTurnPlanMode: Boolean = false,
 ) {
+    // --- memoized size estimate (transient, never serialized) ---
+
+    @kotlinx.serialization.Transient
+    private var sizeMemoAt: Long = -1
+
+    @kotlinx.serialization.Transient
+    private var sizeMemoBytes: Long = 0
+
+    /**
+     * Memoized payload-byte estimate, valid while [updatedAt] is unchanged.
+     * Every mutation path (engine persistChat, panel edits) bumps updatedAt,
+     * so the estimate is recomputed exactly when the content changed and
+     * cached otherwise — prune()/GC run O(all chats × messages) work per
+     * upsert, which became noticeable with many large chats.
+     */
+    fun memoizedBytes(): Long? = if (sizeMemoAt == updatedAt) sizeMemoBytes else null
+
+    fun putMemoizedBytes(bytes: Long) {
+        sizeMemoBytes = bytes
+        sizeMemoAt = updatedAt
+    }
+
     companion object {
         fun new(title: String): ChatSession {
             val now = System.currentTimeMillis()
