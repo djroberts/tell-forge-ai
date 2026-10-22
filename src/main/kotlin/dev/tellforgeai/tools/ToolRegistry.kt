@@ -31,6 +31,9 @@ object ToolRegistry {
             dev.tellforgeai.settings.InstructionsRepoState.getInstance(project).enabled()
         val instructionsWriteEnabled = project != null &&
             dev.tellforgeai.settings.InstructionsRepoState.getInstance(project).writeEnabled()
+        val sentryEnabled = project != null &&
+            dev.tellforgeai.settings.SentryState.getInstance(project).enabled() &&
+            dev.tellforgeai.settings.SentryState.getInstance(project).configured(project)
         return listOfNotNull(
         spec(
             "list_files",
@@ -356,6 +359,55 @@ object ToolRegistry {
             ),
             required = listOf("database"),
         ) else null,
+        // Sentry tools, gated by the per-project Sentry integration. All
+        // read-only: available in both modes, no approval.
+        if (sentryEnabled) spec(
+            "sentry_list_projects",
+            "List the Sentry projects in the configured organization (slugs + ids), so you know " +
+                "where to look. Read-only, both modes, no approval. Configured via the Sentry tab " +
+                "of 'Configure Integrations…'.",
+            jsonObjectProps(
+                "query" to "Optional search hint (ignored by the API); kept for call symmetry.",
+            ),
+            required = listOf(),
+        ) else null,
+        if (sentryEnabled) spec(
+            "sentry_search_issues",
+            "Search grouped Sentry issues (error patterns) in the configured project, or across " +
+                "the whole org when no project slug is set. Supports Sentry search syntax in " +
+                "query: free text plus filters like is:unresolved, level:error, " +
+                "browser.name:Chrome, release:, environment:, user:, status:. Returns issues " +
+                "with counts and first/last seen so you see patterns, not noise. Read-only, both " +
+                "modes, no approval. Use sentry_issue_events on an issue id for raw events.",
+            jsonObjectProps(
+                "query" to "Sentry search query (free text and/or is:/level:/browser.name:/release:/environment: filters).",
+                "statsPeriod" to "Time window, e.g. 14d, 24h (default 14d).",
+                "sort" to "Sort: freq (default), new, date, priority.",
+                "limit" to "Max issues to return (1-50, default 10).",
+            ),
+            required = listOf("query"),
+        ) else null,
+        if (sentryEnabled) spec(
+            "sentry_issue_events",
+            "Fetch the raw log/error events for one Sentry issue (grouped by stacktrace " +
+                "fingerprint), with timestamps, messages, context and top stack frames. Read-only, " +
+                "both modes, no approval. Pass the issue id from sentry_search_issues.",
+            jsonObjectProps(
+                "issue" to "Issue id (from sentry_search_issues).",
+                "limit" to "Max events to return (1-20, default 5).",
+            ),
+            required = listOf("issue"),
+        ) else null,
+        if (sentryEnabled) spec(
+            "sentry_event_detail",
+            "Fetch one full Sentry event with complete stacktrace, breadcrumbs, request, user and " +
+                "context — the forensic deep-dive for 'what went wrong'. Read-only, both modes, no " +
+                "approval. Pass the event id from sentry_issue_events.",
+            jsonObjectProps(
+                "event" to "Event id (from sentry_issue_events).",
+            ),
+            required = listOf("event"),
+        ) else null,
         if (!planMode) spec(
             "download_binary",
             "Download a binary file from an HTTPS URL into the project. This tool is available " +
@@ -505,6 +557,14 @@ object ToolRegistry {
                 else NotionTool.queryDatabase(project, args)
             "notion_describe_database" -> if (!notionAllowed(project)) notEnabled("notion_describe_database")
                 else NotionTool.describeDatabase(project, args)
+            "sentry_list_projects" -> if (!sentryAllowed(project)) notEnabled("sentry_list_projects")
+                else SentryTool.listProjects(project, args)
+            "sentry_search_issues" -> if (!sentryAllowed(project)) notEnabled("sentry_search_issues")
+                else SentryTool.searchIssues(project, args)
+            "sentry_issue_events" -> if (!sentryAllowed(project)) notEnabled("sentry_issue_events")
+                else SentryTool.issueEvents(project, args)
+            "sentry_event_detail" -> if (!sentryAllowed(project)) notEnabled("sentry_event_detail")
+                else SentryTool.eventDetail(project, args)
             "tellforge_instructions_read" -> if (!instructionsAllowed(project)) notEnabled("tellforge_instructions_read")
                 else dev.tellforgeai.tools.InstructionsTool.read(project, args)
             "tellforge_instructions_write" -> when {
@@ -544,11 +604,17 @@ object ToolRegistry {
         return s.enabled() && s.configured(project)
     }
 
+    /** Stale-spec guard: the Sentry tools must be enabled AND configured for this project. */
+    private fun sentryAllowed(project: Project): Boolean {
+        val s = dev.tellforgeai.settings.SentryState.getInstance(project)
+        return s.enabled() && s.configured(project)
+    }
+
     /** Stale-spec guard: the instructions tools must be enabled for this project. */
     private fun instructionsAllowed(project: Project): Boolean =
         dev.tellforgeai.settings.InstructionsRepoState.getInstance(project).enabled()
 
     private fun notEnabled(name: String): String =
         "Error: '$name' is disabled for this project. The user can enable it in the " +
-            "'Configure Tela Wiki…' dialog (Wiki button in the tool window)."
+            "'Configure Integrations…' dialog (Integrations button in the tool window)."
 }

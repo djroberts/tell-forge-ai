@@ -4,6 +4,17 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.19.0] - 2026-11-02
+
+### Added
+- Sentry integration: connect a Sentry org (and optionally a single project)
+  in the Configure Integrations dialog so the agent can investigate errors the
+  application pushed to Sentry, with read-only `sentry_list_projects`,
+  `sentry_search_issues`, `sentry_issue_events` and `sentry_event_detail` tools
+  (integrations)
+- Sentry auth tokens are stored per project in the IDE PasswordSafe, never in
+  plain-text settings files (integrations)
+
 ## [0.18.5] - 2026-11-02
 
 ### Fixed

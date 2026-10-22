@@ -14,9 +14,11 @@ import dev.tellforgeai.llm.InstructionsRepoService
 import dev.tellforgeai.settings.InstructionsRepoState
 import dev.tellforgeai.settings.NotionState
 import dev.tellforgeai.settings.RepoSpec
+import dev.tellforgeai.settings.SentryState
 import dev.tellforgeai.settings.TellForgeAIWikiState
 import dev.tellforgeai.settings.WikiWriteAction
 import dev.tellforgeai.tools.NotionTool
+import dev.tellforgeai.tools.SentryTool
 import dev.tellforgeai.tools.TelaWikiTool
 import javax.swing.JButton
 import javax.swing.JComponent
@@ -38,6 +40,10 @@ import javax.swing.JTextField
  *  - AI instructions: a separate (usually private) git repo holding markdown
  *    instructions injected into the agent's system prompt; enable toggle,
  *    repo URL, branch, sync test, write opt-in (git commit + push).
+ *  - Sentry: enable toggle, org slug, optional project slug, base URL, auth
+ *    token (stored in PasswordSafe per project), connection test. All tools
+ *    are read-only — this integration lets the agent investigate errors the
+ *    application has pushed to Sentry, it never mutates anything.
  *
  * Each tab owns its own form + [apply]; the dialog's OK button calls
  * [IntegrationTab.apply] on all three. Existing per-dialog behaviour is
@@ -53,6 +59,7 @@ class ConfigureIntegrationsDialog(private val project: Project) : DialogWrapper(
         WikiTab(project),
         NotionTab(project),
         InstructionsTab(project),
+        SentryTab(project),
     )
 
     init {
@@ -829,5 +836,74 @@ private class InstructionsTab(private val project: Project) : IntegrationTab {
         // Both flags can only stick with a parseable, enabled configuration.
         state.setEnabled(enable.isSelected && state.configured())
         state.setWriteEnabled(write.isSelected && state.enabled())
+    }
+}
+
+// ----------------------------------------------------------------------
+// Sentry tab
+// ----------------------------------------------------------------------
+
+private class SentryTab(private val project: Project) : IntegrationTab {
+
+    private val state = SentryState.getInstance(project)
+
+    override val title = "Sentry"
+    override val info = "Connect Sentry so the agent can investigate errors. Your application pushes " +
+        "logs/errors to Sentry with its own SDK; the agent queries those errors with read-only tools and " +
+        "explains what went wrong. This never mutates Sentry."
+
+    private val enable = JBCheckBox("Enable Sentry tools for this project", state.enabled())
+    private val orgField = JTextField(state.org(), 34)
+    private val projectField = JTextField(state.project(), 34)
+    private val baseUrlField = JTextField(state.baseUrl(), 34)
+    private val tokenField = JBPasswordField().apply {
+        state.token(project)?.let { text = it }
+    }
+    private val testLabel = JLabel(" ")
+
+    override val panel: JComponent = FormBuilder.createFormBuilder()
+        .addComponent(infoBanner(info), 4)
+        .addComponent(enable, 4)
+        .addLabeledComponent("Organization slug:", orgField)
+        .addLabeledComponent("Project slug (optional; empty = all projects):", projectField)
+        .addLabeledComponent("Base URL:", baseUrlField)
+        .addLabeledComponent("Auth token:", tokenField)
+        .addComponent(testButton(), 4)
+        .addComponent(testLabel, 4)
+        .panel
+
+    private fun testButton() = JButton("Test connection").apply {
+        addActionListener {
+            val token = String(tokenField.password).trim()
+            val org = orgField.text.trim()
+            if (org.isEmpty()) {
+                testLabel.text = "<html><font color='red'>Enter the organization slug first.</font></html>"
+                return@addActionListener
+            }
+            testLabel.text = "Testing…"
+            val base = baseUrlField.text.trim()
+            // Never hit the network on the EDT.
+            com.intellij.util.concurrency.AppExecutorUtil
+                .getAppExecutorService().submit {
+                    val result = SentryTool.testConnection(base, token, org)
+                    com.intellij.openapi.application.ApplicationManager.getApplication()
+                        .invokeLater({
+                            testLabel.text = result
+                        }, com.intellij.openapi.application.ModalityState.any())
+                }
+        }
+    }
+
+    override fun apply() {
+        state.setEnabled(enable.isSelected)
+        state.setOrg(orgField.text)
+        state.setProject(projectField.text)
+        state.setBaseUrl(baseUrlField.text)
+        val token = String(tokenField.password).trim()
+        if (token.isEmpty()) {
+            state.setToken(project, "")
+        } else {
+            state.setToken(project, token)
+        }
     }
 }

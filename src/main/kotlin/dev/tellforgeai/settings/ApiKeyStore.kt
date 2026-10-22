@@ -43,6 +43,10 @@ object ApiKeyStore {
     fun notionTokenId(project: Project): String =
         "notion-token:" + scopeId(project)
 
+    /** Per-project PasswordSafe key for the Sentry auth token. */
+    fun sentryTokenId(project: Project): String =
+        "sentry-token:" + scopeId(project)
+
     /**
      * Stable per-project scope suffix for PasswordSafe keys. "default" covers
      * the default/scratch project where [Project.getBasePath] is null.
