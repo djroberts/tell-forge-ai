@@ -4,6 +4,14 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.19.2] - 2026-11-02
+
+### Fixed
+- Provider dropdowns in the chat panel now refresh immediately after adding or
+  changing providers in the settings page, regardless of how that page was
+  opened (File → Settings, Search Everywhere, …); previously they only updated
+  when opened via the panel's own gear button (ui, settings)
+
 ## [0.19.1] - 2026-11-02
 
 ### Fixed

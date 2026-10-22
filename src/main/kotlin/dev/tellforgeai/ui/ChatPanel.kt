@@ -28,6 +28,7 @@ import dev.tellforgeai.llm.ToolCall
 import dev.tellforgeai.model.ChatSession
 import dev.tellforgeai.model.ProviderProfile
 import dev.tellforgeai.settings.ApiKeyStore
+import dev.tellforgeai.settings.ProviderProfilesListener
 import dev.tellforgeai.settings.TellForgeAIChatsState
 import dev.tellforgeai.settings.TellForgeAIConfigurable
 import dev.tellforgeai.settings.TellForgeAIProjectState
@@ -412,6 +413,14 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     init {
+        // Provider lists stay fresh even when settings were changed outside this
+        // panel's own gear button (File -> Settings, Search Everywhere, …).
+        project.messageBus.connect(TellForgeAIToolWindowDisposable.get(project))
+            .subscribe(ProviderProfilesListener.TOPIC, object : ProviderProfilesListener {
+                override fun providerProfilesChanged() {
+                    ApplicationManager.getApplication().invokeLater { refreshProfiles() }
+                }
+            })
         Disposer.register(TellForgeAIToolWindowDisposable.get(project)) {
             runs.disposeAll()
             fallbackClient.cancel()
@@ -440,8 +449,9 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         homeActButton.addActionListener { setMode(Mode.ACT) }
         settingsButton.toolTipText = "Configure TellForgeAI providers"
         settingsButton.addActionListener {
+            // refreshProfiles() runs via the ProviderProfilesListener topic on Apply.
             ShowSettingsUtil.getInstance()
-                .showSettingsDialog(project, TellForgeAIConfigurable::class.java) { refreshProfiles() }
+                .showSettingsDialog(project, TellForgeAIConfigurable::class.java)
         }
         val integrationsButton = JButton("Integrations").apply {
             toolTipText = "Configure project integrations (Tela wiki, Notion, AI instructions)"

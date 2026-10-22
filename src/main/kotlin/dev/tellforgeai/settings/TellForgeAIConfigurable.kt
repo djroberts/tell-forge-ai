@@ -682,6 +682,10 @@ class TellForgeAIConfigurable(private val project: com.intellij.openapi.project.
         // Keep the key in the settings-session model so switching profiles after
         // Apply still displays it; it is only persisted to PasswordSafe, never XML.
         modified = false
+        // Notify listeners (chat panel dropdowns etc.) so they re-read profiles
+        // immediately — previously the UI only refreshed when this page was
+        // opened through a specific caller-supplied callback.
+        project.messageBus.syncPublisher(ProviderProfilesListener.TOPIC).providerProfilesChanged()
     }
 
     override fun reset() {
