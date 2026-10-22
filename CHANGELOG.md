@@ -4,6 +4,16 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.19.1] - 2026-11-02
+
+### Fixed
+- Pressing Stop while a turn was between tool results and the next model round
+  (no stream in flight) left the engine stuck as "running": every later Send
+  was rejected with "previous turn is still running" while the transcript kept
+  a stale green "✓ Task complete". Stop now ends the turn in that window, the
+  end-of-turn callback is idempotent against a racing stream Done, and a stale
+  deferred round can no longer leak into the next turn (chat, ui)
+
 ## [0.19.0] - 2026-11-02
 
 ### Added

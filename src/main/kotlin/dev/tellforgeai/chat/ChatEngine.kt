@@ -143,6 +143,14 @@ class ChatEngine(
     var completedPlanMode: Boolean? = null
         private set
 
+    /**
+     * Bumped at every [send]; deferred continuations (whenIdle callbacks) carry
+     * their turn's generation and are dropped when it no longer matches, so a
+     * stale callback from a stopped turn can never start a round of the NEXT
+     * turn with captured old-turn state.
+     */
+    private var turnGeneration = 0L
+
     /** Set when the current turn ends with a failure (stream/tool/set-up error). */
     @Volatile
     private var lastTurnFailed: Boolean = false
@@ -191,6 +199,7 @@ class ChatEngine(
             chat.contextSummary.length / 4
         running = true
         stopped = false
+        turnGeneration++
         completedPlanMode = null
         lastTurnFailed = false
         toolRounds = 0
@@ -211,6 +220,13 @@ class ChatEngine(
         // Kill in-flight command processes and release approval gates for this
         // chat so the turn ends now instead of after their timeouts.
         ToolProcessRegistry.abort(chatId)
+        // If the stop landed in a window where no LLM request is in flight
+        // (tool execution, the whenIdle deferral before the next round's
+        // stream, or a compaction summarize), no Done/Error event will ever
+        // arrive to end the turn — without this the engine stays stranded in
+        // running=true and every later Send is swallowed. endTurn's guard
+        // makes this a no-op when an event DOES arrive (active stream tear-down).
+        invokeLater { if (stopped) endTurn() }
     }
 
     /**
@@ -733,9 +749,20 @@ class ChatEngine(
                         // The previous stream's job may still be finishing when Done
                         // was delivered; defer until the client is actually idle so
                         // stream()'s isRunning() guard doesn't drop this turn.
+                        val generation = turnGeneration
                         client.whenIdle {
                             invokeLater {
-                                if (running && !stopped) startTurn()
+                                if (generation != turnGeneration) return@invokeLater
+                                if (running && !stopped) {
+                                    startTurn()
+                                } else {
+                                    // Stop landed inside the deferral window: no
+                                    // stream is active to deliver a Done, so this
+                                    // callback is the last chance to end the turn
+                                    // (endTurn is idempotent — a stop()-scheduled
+                                    // endTurn may already have run).
+                                    endTurn()
+                                }
                             }
                         }
                     }
@@ -752,6 +779,11 @@ class ChatEngine(
 
     /** Ends the turn: clears the live state, records the persisted turn status and notifies the listener. */
     private fun endTurn() {
+        // Idempotence guard: stop() schedules endTurn on the EDT while an
+        // active stream may ALSO deliver a Done/Error that ends the turn —
+        // whichever runs first wins; the second must not double-fire
+        // onTurnEnded or re-persist a conflicting status.
+        if (!running) return
         val wasStopped = stopped
         running = false
         stopped = wasStopped

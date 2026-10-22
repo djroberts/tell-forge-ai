@@ -1704,8 +1704,9 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         // + refreshChatList). Duplicating it here ran several O(chat size)
         // EDT passes back-to-back, which made Stop noticeably laggy on big
         // chats; it also double-inserted the streaming bubble into
-        // finishedBlocks before the callback's own finalize.
-        setStreaming(false)
+        // finishedBlocks before the callback's own finalize. It also flipped
+        // the button back to "Send" while the engine was still mid-turn,
+        // inviting a Send that the running-guard had to reject.
     }
 
     private fun requestApproval(message: String, title: String): Boolean {

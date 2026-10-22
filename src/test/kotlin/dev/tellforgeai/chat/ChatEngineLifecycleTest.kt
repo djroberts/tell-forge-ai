@@ -520,4 +520,93 @@ class ChatEngineLifecycleTest {
         assertFalse("turn must not be stranded in running=true", engine.running)
         assertEquals("deferred turn must complete", "complete", chat.lastTurnStatus)
     }
+
+    // --- stop inside the whenIdle deferral window (stranded-running regression) ---
+
+    /**
+     * Stop pressed while the tool-result round has deferred the next round via
+     * whenIdle (no active stream to deliver a Done): the turn must still end —
+     * previously the deferred callback saw stopped==true and silently skipped,
+     * leaving running=true forever, so every later Send was swallowed with
+     * "previous turn is still running" while the transcript showed a stale
+     * green "✓ Task complete".
+     */
+    @Test
+    fun `stop fired during the whenIdle deferral window ends the turn`() {
+        val chats = FakeChats()
+        val listener = RecordingListener()
+        val client = BusyUntilReleasedClient(
+            listOf(
+                LlmClient.Event.Done(
+                    "", toolCalls = listOf(ToolCall(id = "c1", name = "search_files", arguments = "{}")),
+                ),
+            ),
+        )
+        chats.chats.add(ChatSession.new("t"))
+        val chat = chats.chats.first()
+        val engine = ChatEngine(
+            project = null,
+            chatId = chat.id,
+            listener = listener,
+            requestApproval = { _, _ -> true },
+            projectContext = { "" },
+            instructionsLayer = { "" },
+            deps = ChatEngine.Deps(
+                project = null,
+                clientOverride = client,
+                invokeLater = syncEdt(),
+                chatsGet = chats::get,
+                chatsUpsert = chats::upsert,
+                toolSpecs = { emptyList() },
+                toolExecute = { _, _, _, _, _, _, _ -> "result" },
+                backoffMs = { 0 },
+            ),
+        )
+
+        engine.send("run tool", planMode = false, provider = profile())
+        // The tool round completed; the next round is parked in whenIdle
+        // (client.busy == true) with running == true.
+        assertTrue("turn must be deferred while the client is busy", engine.running)
+        assertEquals(1, client.streamCalls.size)
+
+        // Stop lands in the deferral window — nothing is streaming to deliver a Done.
+        engine.stop()
+        assertTrue("stop inside the deferral window must end the turn", listener.ended.isNotEmpty())
+        assertFalse("turn must not be stranded in running=true", engine.running)
+        assertEquals("stopped", chat.lastTurnStatus)
+
+        // The stranded-turn symptom: a later Send must no longer be gated.
+        // The fake replays a tool-call Done for every stream, so the follow-up
+        // turn also runs an async tool thread — wait for it to finish.
+        engine.send("follow-up", planMode = false, provider = profile())
+        assertTrue("follow-up turn must run", engine.running || listener.ended.size >= 2)
+        client.release()
+        val deadline = System.currentTimeMillis() + 5_000
+        while (engine.running && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+        }
+        assertFalse("follow-up turn must end", engine.running)
+    }
+
+    /** endTurn is idempotent: a stop-scheduled endTurn and a delivered Done must not double-fire. */
+    @Test
+    fun `stop and Done racing do not fire onTurnEnded twice`() {
+        val chats = FakeChats()
+        val listener = RecordingListener()
+        val client = FakeClient(
+            streamEvents = mutableListOf(
+                LlmClient.Event.Delta("answer"),
+                LlmClient.Event.Done("answer", finishReason = "stop"),
+            ),
+        )
+        val engine = plainEngine(chats, client, listener)
+        val chat = chats.chats.first()
+
+        engine.send("task", planMode = false, provider = profile())
+        // The turn already ended (Done delivered synchronously); a late stop
+        // (e.g. the EDT-marshalled one from a previous race) must be a no-op.
+        engine.stop()
+        assertEquals("onTurnEnded must fire exactly once", 1, listener.ended.size)
+        assertEquals("complete", chat.lastTurnStatus)
+    }
 }
