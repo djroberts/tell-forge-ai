@@ -29,8 +29,12 @@ class TellForgeAIChatsState(private val project: Project? = null) : PersistentSt
         prune()
     }
 
-    private fun prune() {
-        val cutoff = System.currentTimeMillis() - RETENTION_MILLIS
+    /**
+     * [nowMillis] is injectable so tests can compare against a single clock
+     * snapshot; production callers use the default (wall clock at call time).
+     */
+    internal fun prune(nowMillis: Long = System.currentTimeMillis()) {
+        val cutoff = nowMillis - RETENTION_MILLIS
         state.chats.removeAll { it.updatedAt < cutoff }
         gcByTotalSize()
     }

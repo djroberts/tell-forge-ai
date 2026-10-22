@@ -4,6 +4,13 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.4] - 2026-11-02
+
+### Fixed
+- Made the 30-day chat-retention boundary test deterministic by injecting a
+  fixed clock into pruning; it no longer flakes on CI because the test and
+  production code read the wall clock a millisecond or two apart (settings, test)
+
 ## [0.18.3] - 2026-11-02
 
 ### Fixed

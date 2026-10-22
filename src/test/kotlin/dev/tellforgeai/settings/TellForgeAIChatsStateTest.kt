@@ -17,31 +17,38 @@ class TellForgeAIChatsStateTest {
     private fun chat(updatedAt: Long): ChatSession =
         ChatSession.new("chat").apply { this.updatedAt = updatedAt }
 
-    @Test
-    fun `loadState removes chats older than 30 days`() {
+    /**
+     * Loads state and re-prunes against a deterministic injected clock so the
+     * cutoff is exact — no wall-clock skew between test setup and prune, which
+     * previously flaked the boundary case on CI.
+     */
+    private fun pruned(updatedAt: Long, nowMillis: Long): TellForgeAIChatsState {
         val chatsState = TellForgeAIChatsState()
-        chatsState.loadState(TellForgeAIChatsState.State().apply {
-            chats.add(chat(System.currentTimeMillis() - 30 * day - 1))
-        })
-        assertTrue(chatsState.all().isEmpty())
+        chatsState.loadState(TellForgeAIChatsState.State().apply { chats.add(chat(updatedAt)) })
+        chatsState.prune(nowMillis = nowMillis)
+        return chatsState
+    }
+
+    @Test
+    fun `chat older than the 30 day cutoff is removed`() {
+        // updatedAt = exactly "now - 31 days", cutoff = "now - 30 days":
+        // updatedAt < cutoff → pruned.
+        val now = System.currentTimeMillis()
+        assertTrue(pruned(now - 31 * day, now).all().isEmpty())
     }
 
     @Test
     fun `chat at exactly the 30 day cutoff survives`() {
-        val chatsState = TellForgeAIChatsState()
-        chatsState.loadState(TellForgeAIChatsState.State().apply {
-            chats.add(chat(System.currentTimeMillis() - 30 * day))
-        })
-        assertEquals(1, chatsState.all().size)
+        // updatedAt = exactly "now - 30 days", cutoff = "now - 30 days":
+        // updatedAt < cutoff is false (strict) → survives.
+        val now = System.currentTimeMillis()
+        assertEquals(1, pruned(now - 30 * day, now).all().size)
     }
 
     @Test
     fun `recent chats survive loadState pruning`() {
-        val chatsState = TellForgeAIChatsState()
-        chatsState.loadState(TellForgeAIChatsState.State().apply {
-            chats.add(chat(System.currentTimeMillis() - day))
-        })
-        assertEquals(1, chatsState.all().size)
+        val now = System.currentTimeMillis()
+        assertEquals(1, pruned(now - day, now).all().size)
     }
 
     @Test
