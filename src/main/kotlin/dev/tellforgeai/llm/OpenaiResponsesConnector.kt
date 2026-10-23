@@ -287,7 +287,9 @@ class OpenaiResponsesConnector : LlmConnector {
 
     /**
      * Responses-tool format is FLAT: {type:"function", name, description,
-     * parameters} — no "function" wrapper like chat/completions.
+     * parameters} — no "function" wrapper like chat/completions. Parameters
+     * may arrive as a kotlinx JsonObject (built-in specs) or a plain
+     * Map<String, Any> (external providers) — both are accepted.
      */
     private fun flatToolSpec(t: Map<String, Any>): JsonElement {
         val fn = t["function"] as? Map<*, *> ?: t
@@ -295,7 +297,12 @@ class OpenaiResponsesConnector : LlmConnector {
             put("type", "function")
             put("name", fn["name"]?.toString().orEmpty())
             put("description", fn["description"]?.toString().orEmpty())
-            (fn["parameters"] as? kotlinx.serialization.json.JsonObject)?.let { put("parameters", it) }
+            when (val params = fn["parameters"]) {
+                is kotlinx.serialization.json.JsonObject -> put("parameters", params)
+                is Map<*, *> -> if (params.isNotEmpty()) {
+                    put("parameters", ChatCompletionsConnector.toJsonValue(params))
+                }
+            }
         }
     }
 

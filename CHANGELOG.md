@@ -4,6 +4,15 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.20.1] - 2026-10-23
+
+### Fixed
+- OpenAI Responses protocol no longer silently drops the parameters schema of
+  tool specs contributed by external plugins (llm)
+- External tool specs whose names collide with built-in tools are dropped with
+  a warning instead of being offered to the model and shadowed by the built-in
+  dispatch (tools)
+
 ## [0.20.0] - 2026-10-23
 
 ### Added

@@ -1,5 +1,6 @@
 package dev.tellforgeai.tools
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -464,6 +465,29 @@ object ToolRegistry {
         providers(project).flatMap { provider ->
             runCatching { provider.specs(project, planMode) }.getOrElse { emptyList() }
         }
+            // A spec whose name collides with a built-in tool would be offered to
+            // the model but silently shadowed by the built-in dispatch — drop and
+            // warn instead of letting a provider hijack or confuse core tools.
+            .filter { s ->
+                val n = (s["function"] as? Map<*, *>)?.get("name")?.toString()
+                if (n in BUILTIN_TOOL_NAMES) {
+                    LOG.warn("TellForgeAI: external tool spec '$n' collides with a built-in tool; ignored")
+                    false
+                } else true
+            }
+
+    private val LOG = Logger.getInstance(ToolRegistry::class.java)
+
+    private val BUILTIN_TOOL_NAMES = setOf(
+        "list_files", "read_file", "search_files", "web_search",
+        "wiki_search", "wiki_read_page", "wiki_write_page", "wiki_delete_page",
+        "notion_search", "notion_read_page", "notion_write_page", "notion_append_blocks",
+        "notion_update_page", "notion_delete_page", "notion_update_block", "notion_upload_file",
+        "notion_move_file", "notion_create_comment", "notion_query_database", "notion_describe_database",
+        "sentry_list_projects", "sentry_search_issues", "sentry_issue_events", "sentry_event_detail",
+        "tellforge_instructions_read", "tellforge_instructions_write",
+        "run_command", "download_binary", "write_file", "edit_file",
+    )
 
     private fun spec(
         name: String,
