@@ -24,7 +24,11 @@ class TellForgeAIChatsStateTest {
      */
     private fun pruned(updatedAt: Long, nowMillis: Long): TellForgeAIChatsState {
         val chatsState = TellForgeAIChatsState()
-        chatsState.loadState(TellForgeAIChatsState.State().apply { chats.add(chat(updatedAt)) })
+        // loadState() prunes with the wall clock; keep the loaded chat fresh so
+        // that internal prune is a no-op, then backdate it before the injected-
+        // clock prune — the only prune whose cutoff we control exactly.
+        chatsState.loadState(TellForgeAIChatsState.State().apply { chats.add(chat(System.currentTimeMillis())) })
+        chatsState.all().forEach { it.updatedAt = updatedAt }
         chatsState.prune(nowMillis = nowMillis)
         return chatsState
     }
