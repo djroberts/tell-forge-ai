@@ -22,6 +22,20 @@ class CommandToolTest {
 
         assertTrue(message.contains("git ls-files"))
         assertTrue(message.contains("'git add docs' was NOT executed"))
+        assertTrue(message.contains("Do NOT retry"))
+        assertTrue(message.contains("switch to Forge mode"))
+    }
+
+    @Test
+    fun `Foretell read-only block messages include the no-retry hard stop`() {
+        val redirect = CommandTool.readOnlyRejection("grep -n x f > out.txt")
+        assertNotNull(redirect)
+        assertTrue(redirect!!.contains("keep being rejected"))
+        assertTrue(redirect.contains("switch to Forge mode"))
+
+        val pipeline = CommandTool.readOnlyRejection("grep -n x f | tee out")
+        assertNotNull(pipeline)
+        assertTrue(pipeline!!.contains("keep being rejected"))
     }
 
     @Test

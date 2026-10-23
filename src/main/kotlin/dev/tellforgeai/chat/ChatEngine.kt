@@ -159,6 +159,16 @@ class ChatEngine(
     private var contextSummary = ""
     private var compactedMessageCount = 0
     private var toolRounds = 0
+
+    /**
+     * Fingerprints of the last few executed tool calls (name + normalized args).
+     * A model that retries the same rejected/failed call with tiny variations
+     * (or re-reads the same file) loops until [MAX_TOOL_ROUNDS]; detecting
+     * near-identical repeats lets us interrupt early with a corrective message.
+     */
+    private val recentToolCallKeys = ArrayDeque<String>()
+
+    private fun repeatLimit() = 3
     /** Estimated current-turn prompt tokens (see [send]). */
     @Volatile
     var lastPromptTokens = 0
@@ -203,6 +213,7 @@ class ChatEngine(
         completedPlanMode = null
         lastTurnFailed = false
         toolRounds = 0
+        recentToolCallKeys.clear()
         contextTrimNotified = false
         compactionInProgress = false
         compactionFailedForCurrentTurn = false
@@ -247,6 +258,7 @@ class ChatEngine(
         stopped = false
         lastTurnFailed = false
         toolRounds = 0
+        recentToolCallKeys.clear()
         lastPromptTokens = Int.MAX_VALUE / 2 // force shouldCompact() in startTurn
         contextTrimNotified = false
         compactionInProgress = false
@@ -709,6 +721,45 @@ class ChatEngine(
         persistChatCoalesced()
         val calls = event.toolCalls
         calls.forEach { listener.onToolPending(it) }
+
+        // Repetition guard: if the model is about to execute the exact same
+        // tool call(s) it already ran this turn, it is stuck in a loop (e.g.
+        // hammering a rejected command in Foretell, or re-reading one file).
+        // Interrupt after REPEAT_LIMIT identical rounds instead of burning
+        // MAX_TOOL_ROUNDS (200) on identical work.
+        val fingerprint = calls.joinToString("|") { it.name + ":" + it.arguments.trim() }
+        recentToolCallKeys.addLast(fingerprint)
+        while (recentToolCallKeys.size > repeatLimit()) recentToolCallKeys.removeFirst()
+        if (recentToolCallKeys.size == repeatLimit() &&
+            recentToolCallKeys.toSet().size == 1
+        ) {
+            recentToolCallKeys.clear()
+            finalizeAssistantBlock()
+            listener.onSystem(
+                "Stopped: the last ${repeatLimit()} tool rounds ran the identical call(s) " +
+                    "(${calls.joinToString { it.name }}) — repeating them will not change the " +
+                    "result. " +
+                    (if (turnPlanMode) "Foretell mode is read-only: if the task needs changes, " +
+                        "give a plan and ask the user to switch to Forge mode. "
+                    else "") +
+                    "Summarize what you have and give a final answer now.",
+            )
+            if (event.fullText.isNotBlank()) {
+                addToMessages {
+                    it += ChatMessage.assistant(event.fullText).copy(reasoning = pendingReasoning)
+                }
+                pendingReasoning = ""
+            }
+            addToMessages {
+                it += ChatMessage.user(
+                    "Tool loop stopped after ${repeatLimit()} identical tool rounds. " +
+                        "Summarize what you have and give a final answer now."
+                ).copy(synthetic = true)
+            }
+            persistChat()
+            endTurn()
+            return
+        }
 
         // Tool execution on background thread; results feed the next turn on EDT.
         Thread {

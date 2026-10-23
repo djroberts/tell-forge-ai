@@ -63,7 +63,10 @@ object CommandTool {
         "Error: in Plan mode only read-only commands are allowed " +
             "(${READ_ONLY_PREFIXES.joinToString(", ")}). '$command' was NOT executed.\n" +
             "Tip: prefer the dedicated tools instead of shell commands — search_files to " +
-            "search file names/contents, read_file to read, list_files to explore."
+            "search file names/contents, read_file to read, list_files to explore.\n" +
+            "This command and any variant will be rejected in Foretell mode. Do NOT retry it. " +
+            "If the task requires changes, end your turn with a plan and ask the user to " +
+            "switch to Forge mode."
 
     private val FORBIDDEN = listOf(
         "rm ", "rm\t", "rmdir ", "del ", "rd ", "sudo", "shutdown", "reboot", "mkfs",
@@ -135,7 +138,7 @@ object CommandTool {
             val outsideQuotes = stripQuotes(segment)
             // Any metacharacter other than the pipes we split on is unsafe.
             UNESCAPED_META.find(outsideQuotes)?.let { m ->
-                return redirectBlock(command, m.value)
+                return redirectBlock(command, m.value, planMode = true)
             }
         }
         if (segments.size > 1) {
@@ -143,7 +146,7 @@ object CommandTool {
                 if (!SAFE_PIPE_TAIL.containsMatchIn(tail)) {
                     // Empty or non-allowlisted tail: fall back to the general block so the
                     // model understands the pipeline itself was the problem.
-                    return redirectBlock(command, "|")
+                    return redirectBlock(command, "|", planMode = true)
                 }
             }
         }
@@ -154,7 +157,7 @@ object CommandTool {
     private fun stripQuotes(segment: String): String =
         Regex("""'[^']*'|"[^"]*"""").replace(segment, " ")
 
-    private fun redirectBlock(command: String, op: String): String =
+    private fun redirectBlock(command: String, op: String, planMode: Boolean = false): String =
         "Blocked: '$op' is not allowed" +
             (if (op == "|") " in this position. Only pipelines into pure readers are allowed " +
                 "in read-only mode: | head, | tail, | wc, | sort, | uniq, | cut. "
@@ -166,7 +169,11 @@ object CommandTool {
             "  - Read a file with line numbers -> read_file(path=\"...\")\n" +
             "  - Explore structure -> list_files(path=\"...\")\n" +
             "A plain single command without operators is fine. Do not retry variations of " +
-            "this command."
+            "this command." +
+            (if (planMode) "\nIn Foretell mode this command and any variant will keep being " +
+                "rejected. Do NOT retry. If the task requires changes, end your turn with a " +
+                "plan and ask the user to switch to Forge mode."
+            else "")
 
     fun run(
         project: Project,

@@ -4,6 +4,21 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.19.3] - 2026-11-02
+
+### Fixed
+- Models no longer burn the full tool-round budget retrying rejected commands
+  in Foretell mode: the run_command tool description, Foretell system prompt
+  and every read-only rejection message now state plainly that write attempts
+  and their variants will keep being rejected, and to end the turn with a plan
+  and ask the user to switch to Forge mode (llm, tools)
+
+### Added
+- Tool-loop repetition guard: a turn that issues the identical tool call(s)
+  for three consecutive rounds (rejected-command retries, re-reading the same
+  file) is stopped early with a corrective message instead of after 200 rounds
+  (chat)
+
 ## [0.19.2] - 2026-11-02
 
 ### Fixed

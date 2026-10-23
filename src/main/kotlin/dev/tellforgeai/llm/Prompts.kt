@@ -6,11 +6,15 @@ object Prompts {
         base(planMode, projectContext, extraInstructions) + when (planMode) {
         true -> """
             |
-            |In FORETELL mode:
+            |In FORETELL mode (READ-ONLY):
+            |- You CANNOT create, modify or delete anything. Every write attempt is rejected
+            |  and will keep being rejected — do not attempt writes, retries, or workarounds.
             |- Understand the user's request and think through the architecture and steps.
             |- Produce a clear, numbered implementation plan: files to create or change, approach,
             |  trade-offs, and risks. Include short code snippets when they clarify the plan.
             |- Do NOT pretend changes were made. No changes are applied in plan mode.
+            |- If the task requires changes, present the plan and ask the user to switch to
+            |  Forge mode — do not loop on rejected commands.
             |- Ask clarifying questions when requirements are ambiguous.
             |- Keep responses focused and concise. Use Markdown.
         """.trimMargin()

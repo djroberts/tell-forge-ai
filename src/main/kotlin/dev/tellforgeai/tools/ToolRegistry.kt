@@ -77,11 +77,17 @@ object ToolRegistry {
                 "PREFERRED ALTERNATIVES: use search_files for searching, read_file for reading " +
                 "files, list_files for structure — run_command is a last resort when no " +
                 "dedicated tool fits (e.g. git status, npm --version).\n" +
-                (if (planMode) "Foretell mode: only read-only commands are allowed (ls, cat, find, " +
-                    "git status/log/diff, node --version, ...). " else "") +
-                "MUTATIONS ARE ALLOWED in Forge mode when the user asks for them: " +
-                "git add/commit/push, npm install, gradle build, git config and similar " +
-                "state-changing commands run fine as single commands. " +
+                (if (planMode)
+                    "Foretell (read-only) mode: ONLY read-only commands are allowed (ls, cat, head, " +
+                        "tail, find, grep, git status/log/diff/show, node --version, ...). " +
+                        "Any mutating command (git add/commit/push, npm install, gradle build, ...) " +
+                        "is REJECTED and will keep being rejected — do not attempt it or a variant. " +
+                        "If your task requires changes, do NOT try to write: end your turn with a " +
+                        "numbered implementation plan and tell the user to switch to Forge mode. "
+                else
+                    "MUTATIONS ARE ALLOWED in Forge mode when the user asks for them: " +
+                        "git add/commit/push, npm install, gradle build, git config and similar " +
+                        "state-changing commands run fine as single commands. ") +
                 "NEVER use redirects (>, >>, 2>&1), command substitution (\$(...), backticks) " +
                 "or compound commands (;, &&, ||) — these are always refused. " +
                 "In Foretell mode simple pipelines into pure readers ARE allowed: " +
@@ -94,9 +100,12 @@ object ToolRegistry {
                 "filtering, use search_files or read_file rather than 'grep ... | head'.\n" +
                 "Long-running commands (builds, installs) may pass a per-call timeout in " +
                 "seconds (max 300, 5 minutes); the default is the global setting.\n" +
-                "Do NOT claim a mutation is impossible without first TRYING it: if the user " +
-                "is confident a command should work, run it once and report the real error " +
-                "instead of asserting tool restrictions from memory.\n" +
+                (if (!planMode)
+                    "Do NOT claim a mutation is impossible without first TRYING it: if the user " +
+                        "is confident a command should work, run it once and report the real error " +
+                        "instead of asserting tool restrictions from memory. "
+                else "") +
+                "If a command is blocked or rejected, do NOT retry variations of it. " +
                 "Destructive commands (rm, sudo, force-push) still need explicit user request.",
             jsonObjectProps("command" to "The shell command to execute. A single plain command — " +
                 "no redirects (including 2>&1) or chaining; pipes into pure readers " +
