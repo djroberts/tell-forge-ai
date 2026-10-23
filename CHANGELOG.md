@@ -4,6 +4,12 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.19.4] - 2026-11-02
+
+### Fixed
+- CI test flake: chat retention boundary test no longer races the internal
+  wall-clock prune in loadState (tests)
+
 ## [0.19.3] - 2026-11-02
 
 ### Fixed
