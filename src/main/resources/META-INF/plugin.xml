@@ -31,6 +31,14 @@
     </ul>
     ]]></description>
     <depends>com.intellij.modules.platform</depends>
+    <extensionPoints>
+        <extensionPoint qualifiedName="dev.tellforgeai.tool"
+                        interface="dev.tellforgeai.tools.ExternalToolProvider"
+                        dynamic="true"/>
+        <extensionPoint qualifiedName="dev.tellforgeai.integration"
+                        interface="dev.tellforgeai.tools.IntegrationProvider"
+                        dynamic="true"/>
+    </extensionPoints>
     <extensions defaultExtensionNs="com.intellij">
         <applicationService
                 serviceImplementation="dev.tellforgeai.settings.TellForgeAISettings"

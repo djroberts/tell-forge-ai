@@ -17,6 +17,7 @@ import dev.tellforgeai.settings.RepoSpec
 import dev.tellforgeai.settings.SentryState
 import dev.tellforgeai.settings.TellForgeAIWikiState
 import dev.tellforgeai.settings.WikiWriteAction
+import dev.tellforgeai.tools.IntegrationProvider
 import dev.tellforgeai.tools.NotionTool
 import dev.tellforgeai.tools.SentryTool
 import dev.tellforgeai.tools.TelaWikiTool
@@ -60,7 +61,36 @@ class ConfigureIntegrationsDialog(private val project: Project) : DialogWrapper(
         NotionTab(project),
         InstructionsTab(project),
         SentryTab(project),
-    )
+    ) + externalTabs()
+
+    /**
+     * Tabs contributed by other plugins via the `dev.tellforgeai.integration`
+     * extension point, appended after the built-ins. The dialog is rebuilt on
+     * every [show], so the lookup is always current. A provider whose panel
+     * construction fails degrades to an error label instead of breaking the
+     * dialog; a failing [IntegrationProvider.apply] is logged and skipped so
+     * OK still closes and the other tabs persist.
+     */
+    private fun externalTabs(): List<IntegrationTab> =
+        IntegrationProvider.EP_NAME.getExtensions(project).map { provider ->
+            object : IntegrationTab {
+                override val title = provider.title
+                override val info = provider.info
+                override val panel: JComponent = runCatching { provider.createPanel(project) }
+                    .getOrElse {
+                        JBLabel(
+                            "<html>Failed to load integration '${provider.title}': " +
+                                "${it.message ?: it.javaClass.simpleName}</html>",
+                        )
+                    }
+                override fun apply() {
+                    runCatching { provider.apply(project) }.onFailure {
+                        com.intellij.openapi.diagnostic.Logger.getInstance("TellForgeAI")
+                            .warn("Integration provider '${provider.title}' failed to apply", it)
+                    }
+                }
+            }
+        }
 
     init {
         title = "Configure Integrations"

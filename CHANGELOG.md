@@ -4,6 +4,13 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.20.0] - 2026-10-23
+
+### Added
+- Plugin extension points: other plugins can now contribute chat tools
+  (`dev.tellforgeai.tool`) and add tabs to the Configure Integrations dialog
+  (`dev.tellforgeai.integration`) (tools, ui)
+
 ## [0.19.4] - 2026-11-02
 
 ### Fixed

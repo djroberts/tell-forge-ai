@@ -452,8 +452,18 @@ object ToolRegistry {
             ),
             required = listOf("path", "oldString", "newString"),
         ) else null,
-        )
+        ) + externalSpecs(project, planMode)
     }
+
+    /** Registered third-party tool providers (extension point `dev.tellforgeai.tool`). */
+    private fun providers(project: Project?): List<ExternalToolProvider> =
+        ExternalToolProvider.EP_NAME.getExtensions(project).toList()
+
+    /** Specs contributed by external providers; a failing provider yields nothing. */
+    private fun externalSpecs(project: Project?, planMode: Boolean): List<Map<String, Any>> =
+        providers(project).flatMap { provider ->
+            runCatching { provider.specs(project, planMode) }.getOrElse { emptyList() }
+        }
 
     private fun spec(
         name: String,
@@ -592,7 +602,15 @@ object ToolRegistry {
                 else DownloadBinaryTool.download(project, args, onDownloadRequested ?: { false })
             "write_file" -> if (planMode) notAllowedInPlan(name) else EditorTools.writeFile(project, args)
             "edit_file" -> if (planMode) notAllowedInPlan(name) else EditorTools.editFile(project, args)
-            else -> "Error: unknown tool '$name'"
+            else -> providers(project)
+                .firstOrNull { provider ->
+                    runCatching { provider.handles(name, project) }.getOrDefault(false)
+                }
+                ?.let { provider ->
+                    runCatching { provider.execute(project, name, args, planMode, chatId) }
+                        .getOrElse { "Error executing $name: ${it.message ?: it.javaClass.simpleName}" }
+                }
+                ?: "Error: unknown tool '$name'"
         }
     } catch (e: Exception) {
         "Error executing $name: ${e.message ?: e.javaClass.simpleName}"
