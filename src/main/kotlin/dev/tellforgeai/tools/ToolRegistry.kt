@@ -481,7 +481,7 @@ object ToolRegistry {
 
     /** Registered third-party tool providers (extension point `dev.tellforgeai.tool`). */
     private fun providers(project: Project?): List<ExternalToolProvider> =
-        ExternalToolProvider.EP_NAME.getExtensions(project).toList()
+        ExternalToolProvider.EP_NAME.getExtensionsSafe(project)
 
     /** Specs contributed by external providers; a failing provider yields nothing. */
     private fun externalSpecs(project: Project?, planMode: Boolean): List<Map<String, Any>> =

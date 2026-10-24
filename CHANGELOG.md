@@ -4,6 +4,15 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.20.3] - 2026-11-05
+
+### Fixed
+- Missing extension points (e.g. after a mid-session plugin reload) no longer
+  break chat turns or the Configure Integrations dialog: external tool and
+  integration lookups degrade gracefully, and a failed tool-spec build falls
+  back to built-in tools instead of leaving the chat stuck on "Thinking…"
+  (tools, chat, ui)
+
 ## [0.20.2] - 2026-11-05
 
 ### Added

@@ -2,6 +2,7 @@ package dev.tellforgeai.chat
 
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
 import dev.tellforgeai.llm.ChatMessage
 import dev.tellforgeai.llm.ContextGuard
@@ -379,7 +380,20 @@ class ChatEngine(
         attempt: Int = 1,
     ) {
         var sawDelta = false
-        client.stream(provider, turnPlanMode, messages, deps.toolSpecs(turnPlanMode)) { event ->
+        // Tool-spec building queries the platform's extension registry; if it
+        // fails (e.g. a project container missing this plugin's extension
+        // points after a mid-session plugin reload) the exception must not
+        // escape before/around client.stream — that would leave the UI stuck
+        // on "Thinking…" forever with no event ever fired. Degrade to
+        // built-in specs only (empty external list) and keep the turn alive.
+        val specs = try {
+            deps.toolSpecs(turnPlanMode)
+        } catch (t: Throwable) {
+            if (t is ProcessCanceledException) throw t
+            LOG.warn("TellForgeAI: failed to build tool specs; continuing without external tools", t)
+            emptyList()
+        }
+        client.stream(provider, turnPlanMode, messages, specs) { event ->
             // invoked on a background thread; marshal to the EDT
             invokeLater {
                 // After Stop only finalize: the cancellation surfaces as a Done

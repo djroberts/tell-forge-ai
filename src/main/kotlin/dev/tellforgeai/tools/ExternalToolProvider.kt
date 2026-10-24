@@ -1,8 +1,37 @@
 package dev.tellforgeai.tools
 
+import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.extensions.ExtensionPointName
+import com.intellij.openapi.extensions.Extensions
 import com.intellij.openapi.project.Project
 import kotlinx.serialization.json.JsonObject
+
+/**
+ * Extensions registered for [this] extension point, resolved for [project]
+ * without ever letting the platform's "Missing extension point"
+ * [IllegalArgumentException] escape.
+ *
+ * `ExtensionPointName.getExtensions(areaInstance)` performs a non-fallback
+ * lookup: it throws if the point is not registered in the container it is
+ * handed. That happens when a project container exists without this
+ * plugin's extension points registered in it (e.g. the plugin jar was
+ * reloaded while projects were already open, or the plugin's descriptor
+ * failed to register EPs in an open project's container). Instead of
+ * crashing the caller we degrade: prefer the project's registrations, then
+ * the application (root) area's, else an empty list — logging at debug so
+ * the situation is visible but harmless.
+ */
+internal fun <T : Any> ExtensionPointName<T>.getExtensionsSafe(project: Project?): List<T> {
+    project?.extensionArea?.takeIf { it.hasExtensionPoint(name) }?.let { area ->
+        return area.getExtensionPoint(this).getExtensionList()
+    }
+    val root = Extensions.getRootArea()
+    if (root.hasExtensionPoint(name)) {
+        return root.getExtensionPoint(this).getExtensionList()
+    }
+    thisLogger().debug("Extension point '$name' is not registered in project or root area; returning no extensions")
+    return emptyList()
+}
 
 /**
  * Extension point `dev.tellforgeai.tool`: lets other plugins contribute chat

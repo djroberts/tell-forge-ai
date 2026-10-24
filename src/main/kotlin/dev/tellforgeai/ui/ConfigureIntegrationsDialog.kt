@@ -19,6 +19,7 @@ import dev.tellforgeai.settings.TellForgeAIWikiState
 import dev.tellforgeai.settings.WebFetchState
 import dev.tellforgeai.settings.WikiWriteAction
 import dev.tellforgeai.tools.IntegrationProvider
+import dev.tellforgeai.tools.getExtensionsSafe
 import dev.tellforgeai.tools.NotionTool
 import dev.tellforgeai.tools.SentryTool
 import dev.tellforgeai.tools.TelaWikiTool
@@ -75,7 +76,7 @@ class ConfigureIntegrationsDialog(private val project: Project) : DialogWrapper(
      * OK still closes and the other tabs persist.
      */
     private fun externalTabs(): List<IntegrationTab> =
-        IntegrationProvider.EP_NAME.getExtensions(project).map { provider ->
+        IntegrationProvider.EP_NAME.getExtensionsSafe(project).map { provider ->
             object : IntegrationTab {
                 override val title = provider.title
                 override val info = provider.info
