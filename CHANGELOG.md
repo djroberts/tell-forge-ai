@@ -4,6 +4,14 @@ All notable changes to TellForgeAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.20.2] - 2026-11-05
+
+### Added
+- webfetch integration: per-project service URL + optional bearer token
+  (stored in PasswordSafe) in the Configure Integrations dialog, with a
+  connection test, plus a read-only `web_fetch` tool that fetches URLs as
+  markdown via the tiered fetch service (integrations, tools)
+
 ## [0.20.1] - 2026-10-23
 
 ### Fixed

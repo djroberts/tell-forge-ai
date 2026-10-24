@@ -16,11 +16,13 @@ import dev.tellforgeai.settings.NotionState
 import dev.tellforgeai.settings.RepoSpec
 import dev.tellforgeai.settings.SentryState
 import dev.tellforgeai.settings.TellForgeAIWikiState
+import dev.tellforgeai.settings.WebFetchState
 import dev.tellforgeai.settings.WikiWriteAction
 import dev.tellforgeai.tools.IntegrationProvider
 import dev.tellforgeai.tools.NotionTool
 import dev.tellforgeai.tools.SentryTool
 import dev.tellforgeai.tools.TelaWikiTool
+import dev.tellforgeai.tools.WebFetchTool
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JLabel
@@ -61,6 +63,7 @@ class ConfigureIntegrationsDialog(private val project: Project) : DialogWrapper(
         NotionTab(project),
         InstructionsTab(project),
         SentryTab(project),
+        WebFetchTab(project),
     ) + externalTabs()
 
     /**
@@ -935,5 +938,55 @@ private class SentryTab(private val project: Project) : IntegrationTab {
         } else {
             state.setToken(project, token)
         }
+    }
+}
+
+private class WebFetchTab(private val project: Project) : IntegrationTab {
+
+    private val state = WebFetchState.getInstance(project)
+
+    override val title = "webfetch"
+    override val info = "Point the agent's web_fetch tool at a webfetch service (tiered URL → " +
+        "markdown fetch: static HTTP first, optional Playwright browser render for SPAs). " +
+        "A bearer token is optional — leave it empty for an unprotected local instance."
+
+    private val enable = JBCheckBox("Enable web_fetch for this project", state.enabled())
+    private val baseUrlField = JTextField(state.baseUrl(), 34)
+    private val tokenField = JBPasswordField().apply {
+        state.token(project)?.let { text = it }
+    }
+    private val testLabel = JLabel(" ")
+
+    override val panel: JComponent = FormBuilder.createFormBuilder()
+        .addComponent(infoBanner(info), 4)
+        .addComponent(enable, 4)
+        .addLabeledComponent("Service URL:", baseUrlField)
+        .addLabeledComponent("Bearer token (optional):", tokenField)
+        .addComponent(testButton(), 4)
+        .addComponent(testLabel, 4)
+        .panel
+
+    private fun testButton() = JButton("Test connection").apply {
+        addActionListener {
+            testLabel.text = "Testing…"
+            val url = baseUrlField.text.trim()
+            val token = String(tokenField.password).trim()
+            // Never hit the network on the EDT.
+            com.intellij.util.concurrency.AppExecutorUtil
+                .getAppExecutorService().submit {
+                    val result = WebFetchTool.testConnection(url, token)
+                    com.intellij.openapi.application.ApplicationManager.getApplication()
+                        .invokeLater({
+                            testLabel.text = result
+                        }, com.intellij.openapi.application.ModalityState.any())
+                }
+        }
+    }
+
+    override fun apply() {
+        state.setEnabled(enable.isSelected)
+        state.setBaseUrl(baseUrlField.text)
+        val token = String(tokenField.password).trim()
+        state.setToken(project, token)
     }
 }

@@ -47,6 +47,10 @@ object ApiKeyStore {
     fun sentryTokenId(project: Project): String =
         "sentry-token:" + scopeId(project)
 
+    /** Per-project PasswordSafe key for the optional webfetch bearer token. */
+    fun webFetchTokenId(project: Project): String =
+        "webfetch-token:" + scopeId(project)
+
     /**
      * Stable per-project scope suffix for PasswordSafe keys. "default" covers
      * the default/scratch project where [Project.getBasePath] is null.

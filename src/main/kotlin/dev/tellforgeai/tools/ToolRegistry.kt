@@ -35,6 +35,9 @@ object ToolRegistry {
         val sentryEnabled = project != null &&
             dev.tellforgeai.settings.SentryState.getInstance(project).enabled() &&
             dev.tellforgeai.settings.SentryState.getInstance(project).configured(project)
+        val webFetchEnabled = project != null &&
+            dev.tellforgeai.settings.WebFetchState.getInstance(project).enabled() &&
+            dev.tellforgeai.settings.WebFetchState.getInstance(project).configured(project)
         return listOfNotNull(
         spec(
             "list_files",
@@ -418,6 +421,26 @@ object ToolRegistry {
             ),
             required = listOf("event"),
         ) else null,
+        // web_fetch, gated by the per-project webfetch integration. Read-only:
+        // available in both modes, no approval.
+        if (webFetchEnabled) spec(
+            "web_fetch",
+            "Fetch a URL through the project's webfetch service and return its content as " +
+                "markdown (or html). Tiered: static fetch first, optional browser render for " +
+                "SPAs. Read-only, both modes, no approval. Supports start_index/max_length " +
+                "pagination for long pages. Use web_search first to find pages; use this to " +
+                "read one. Configured via the webfetch tab of 'Configure Integrations…'.",
+            jsonObjectProps(
+                "url" to "The http/https URL to fetch.",
+                "format" to "Optional 'markdown' (default) or 'html'.",
+                "render" to "Optional: 'auto' (default, escalate to browser render when thin), " +
+                    "'never' (static only, cheapest), 'always' (force browser render, for SPAs).",
+                "max_length" to "Optional max characters to return (default 20000).",
+                "start_index" to "Optional character offset to continue a truncated fetch.",
+                "bypass_cache" to "Optional 'true' to skip the service's cache.",
+            ),
+            required = listOf("url"),
+        ) else null,
         if (!planMode) spec(
             "download_binary",
             "Download a binary file from an HTTPS URL into the project. This tool is available " +
@@ -485,6 +508,7 @@ object ToolRegistry {
         "notion_update_page", "notion_delete_page", "notion_update_block", "notion_upload_file",
         "notion_move_file", "notion_create_comment", "notion_query_database", "notion_describe_database",
         "sentry_list_projects", "sentry_search_issues", "sentry_issue_events", "sentry_event_detail",
+        "web_fetch",
         "tellforge_instructions_read", "tellforge_instructions_write",
         "run_command", "download_binary", "write_file", "edit_file",
     )
@@ -608,6 +632,8 @@ object ToolRegistry {
                 else SentryTool.issueEvents(project, args)
             "sentry_event_detail" -> if (!sentryAllowed(project)) notEnabled("sentry_event_detail")
                 else SentryTool.eventDetail(project, args)
+            "web_fetch" -> if (!webFetchAllowed(project)) notEnabled("web_fetch")
+                else WebFetchTool.fetch(project, args)
             "tellforge_instructions_read" -> if (!instructionsAllowed(project)) notEnabled("tellforge_instructions_read")
                 else dev.tellforgeai.tools.InstructionsTool.read(project, args)
             "tellforge_instructions_write" -> when {
@@ -658,6 +684,12 @@ object ToolRegistry {
     /** Stale-spec guard: the Sentry tools must be enabled AND configured for this project. */
     private fun sentryAllowed(project: Project): Boolean {
         val s = dev.tellforgeai.settings.SentryState.getInstance(project)
+        return s.enabled() && s.configured(project)
+    }
+
+    /** Stale-spec guard: web_fetch must be enabled AND configured for this project. */
+    private fun webFetchAllowed(project: Project): Boolean {
+        val s = dev.tellforgeai.settings.WebFetchState.getInstance(project)
         return s.enabled() && s.configured(project)
     }
 
